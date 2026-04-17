@@ -7,8 +7,12 @@ export type MoveNode = {
 
 export type MoveForest = MoveNode[]
 
+function siblingSortKey(m: Move): string {
+  return `${m.createdAt ?? ''}\t${m.id}`
+}
+
 export function buildMoveForest(moves: Move[]): MoveForest {
-  const byParent = new Map<number | null, Move[]>()
+  const byParent = new Map<string | null, Move[]>()
   for (const m of moves) {
     const key = m.parentId ?? null
     const list = byParent.get(key)
@@ -16,22 +20,21 @@ export function buildMoveForest(moves: Move[]): MoveForest {
     else byParent.set(key, [m])
   }
 
-  const build = (parentId: number | null): MoveNode[] => {
+  const build = (parentId: string | null): MoveNode[] => {
     const list = byParent.get(parentId) ?? []
-    // Stable order (roughly creation order) for deterministic UI.
-    list.sort((a, b) => (a.id ?? 0) - (b.id ?? 0))
+    list.sort((a, b) => siblingSortKey(a).localeCompare(siblingSortKey(b)))
     return list.map((move) => ({
       move,
-      children: build(move.id ?? -1),
+      children: build(move.id),
     }))
   }
 
   return build(null)
 }
 
-export function pathToIdSet(path: Move[]): Set<number> {
-  const s = new Set<number>()
-  for (const m of path) if (m.id != null) s.add(m.id)
+export function pathToIdSet(path: Move[]): Set<string> {
+  const s = new Set<string>()
+  for (const m of path) s.add(m.id)
   return s
 }
 
@@ -49,4 +52,3 @@ export function collectLeafPaths(forest: MoveForest): Move[][] {
   walk(forest, [])
   return out
 }
-

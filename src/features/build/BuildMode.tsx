@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Chess } from 'chess.js'
 import type { Key } from 'chessground/types'
+import type { DrawShape } from 'chessground/draw'
 
 import { Board } from '../../components/Board'
 import { computeDests } from '../../chess/computeDests'
@@ -14,12 +15,15 @@ import {
   listChildrenMoves,
   listAllMoves,
   listRepertoires,
+  updateMove,
 } from '../../db/repertoireRepo'
+import { getSupabaseClient } from '../../lib/supabaseClient'
 import { MoveTreeView } from './MoveTreeView'
+import { OpeningExplorer } from './OpeningExplorer'
 
 type Toast = { type: 'info' | 'error'; message: string } | null
 type Mode = 'build' | 'train'
-type TrainRunKind = 'full' | 'selection' | 'failed'
+type TrainRunKind = 'full' | 'selection' | 'failed' | 'random'
 type Modal =
   | {
       kind: 'trainStart'
@@ -28,17 +32,25 @@ type Modal =
       hasSelection: boolean
     }
   | {
+      kind: 'trainRandomConfig'
+      maxCount: number
+      hasSelection: boolean
+      selectionMaxCount: number
+    }
+  | {
       kind: 'trainSummary'
       totalPositions: number
       passed: number
       failed: number
-      failedPositions: Array<number | null>
+      failedPositions: Array<string | null>
     }
   | { kind: 'confirmDeleteMove'; move: Move }
   | null
 
 type View = 'home' | 'session'
-type RepertoireCounts = Record<number, number>
+type RepertoireCounts = Record<string, number>
+type AnnotationTool = 'none' | 'arrow' | 'circle'
+type AnnotationBrush = NonNullable<DrawShape['brush']>
 
 function sideToTurn(side: Side): 'w' | 'b' {
   return side === 'white' ? 'w' : 'b'
@@ -54,10 +66,10 @@ export function BuildMode() {
   const [view, setView] = useState<View>('home')
   const [repertoires, setRepertoires] = useState<Repertoire[]>([])
   const [repertoireCounts, setRepertoireCounts] = useState<RepertoireCounts>({})
-  const [activeRepertoireId, setActiveRepertoireId] = useState<number | null>(null)
+  const [activeRepertoireId, setActiveRepertoireId] = useState<string | null>(null)
   const [activeRepertoire, setActiveRepertoire] = useState<Repertoire | null>(null)
 
-  const [currentNodeId, setCurrentNodeId] = useState<number | null>(null)
+  const [currentNodeId, setCurrentNodeId] = useState<string | null>(null)
   const [path, setPath] = useState<Move[]>([])
   const [children, setChildren] = useState<Move[]>([])
   const [allMoves, setAllMoves] = useState<Move[]>([])
@@ -70,21 +82,32 @@ export function BuildMode() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [flipBoard, setFlipBoard] = useState(false)
   const [showDests, setShowDests] = useState(true)
-  const exploredByParentRef = useRef<Map<number | null, Set<number>>>(new Map())
+  const [showBoardAnnotations, setShowBoardAnnotations] = useState(true)
+  const [shapesByFen, setShapesByFen] = useState<Record<string, DrawShape[]>>({})
+  const [annotationTool, setAnnotationTool] = useState<AnnotationTool>('none')
+  const [annotationBrush, setAnnotationBrush] = useState<AnnotationBrush>('green')
+  const [pendingArrowFrom, setPendingArrowFrom] = useState<Key | null>(null)
+  const [openingExplorerCollapsed, setOpeningExplorerCollapsed] = useState(false)
+  const exploredByParentRef = useRef<Map<string | null, Set<string>>>(new Map())
   const [modal, setModal] = useState<Modal>(null)
 
   const [trainRunActive, setTrainRunActive] = useState(false)
   const [trainRunKind, setTrainRunKind] = useState<TrainRunKind>('full')
-  const [trainScopeRootId, setTrainScopeRootId] = useState<number | null>(null)
-  const passedPositionsRef = useRef<Set<number | null>>(new Set())
-  const failedPositionsRef = useRef<Set<number | null>>(new Set())
-  const [trainRunPositions, setTrainRunPositions] = useState<Array<number | null> | null>(null)
+  const [trainScopeRootId, setTrainScopeRootId] = useState<string | null>(null)
+  const passedPositionsRef = useRef<Set<string | null>>(new Set())
+  const failedPositionsRef = useRef<Set<string | null>>(new Set())
+  const [trainRunPositions, setTrainRunPositions] = useState<Array<string | null> | null>(null)
   const [trainRunIndex, setTrainRunIndex] = useState(0)
   const [trainPassed, setTrainPassed] = useState(0)
   const [trainFailed, setTrainFailed] = useState(0)
+  const [trainCombo, setTrainCombo] = useState(0)
+  const [trainDepthBase, setTrainDepthBase] = useState(0)
   const [trainMissPulse, setTrainMissPulse] = useState(false)
   const [hintStep, setHintStep] = useState<0 | 1 | 2>(0)
   const [replayingSequence, setReplayingSequence] = useState(false)
+  const lastTrainQuestionKeyRef = useRef<string | null | 'none'>('none')
+  const [randomCountDraft, setRandomCountDraft] = useState(10)
+  const [randomScopeSelected, setRandomScopeSelected] = useState(false)
 
   const currentFen = useMemo(() => {
     if (path.length === 0) return new Chess().fen()
@@ -101,9 +124,9 @@ export function BuildMode() {
   const dests = useMemo(() => computeDests(chess), [chess])
   const forest = useMemo(() => buildMoveForest(allMoves), [allMoves])
   const movesById = useMemo(() => {
-    const map = new Map<number, Move>()
+    const map = new Map<string, Move>()
     for (const move of allMoves) {
-      if (move.id != null) map.set(move.id, move)
+      map.set(move.id, move)
     }
     return map
   }, [allMoves])
@@ -115,10 +138,10 @@ export function BuildMode() {
   const trainPositions = useMemo(() => {
     if (!activeRepertoire) return []
 
-    const byId = new Map<number, Move>()
-    for (const m of allMoves) if (m.id != null) byId.set(m.id, m)
+    const byId = new Map<string, Move>()
+    for (const m of allMoves) byId.set(m.id, m)
 
-    const childrenByParent = new Map<number | null, Move[]>()
+    const childrenByParent = new Map<string | null, Move[]>()
     for (const m of allMoves) {
       const key = m.parentId ?? null
       const list = childrenByParent.get(key)
@@ -127,7 +150,7 @@ export function BuildMode() {
     }
 
     const parents = [...childrenByParent.keys()]
-    const out: Array<number | null> = []
+    const out: Array<string | null> = []
     for (const parentId of parents) {
       const kids = childrenByParent.get(parentId) ?? []
       if (kids.length === 0) continue
@@ -147,7 +170,7 @@ export function BuildMode() {
   const selectionTrainPositions = useMemo(() => {
     if (currentNodeId == null) return trainPositions
 
-    const isInSubtree = (positionId: number | null) => {
+    const isInSubtree = (positionId: string | null) => {
       if (positionId === currentNodeId) return true
       let cursor = positionId
       while (cursor != null) {
@@ -189,6 +212,8 @@ export function BuildMode() {
       ? 'black'
       : 'white'
   const boardDests = showDests ? dests : new Map<Key, Key[]>()
+  const currentShapes = shapesByFen[currentFen] ?? []
+  const isAnnotating = mode === 'build' && annotationTool !== 'none'
   const whiteRepertoires = useMemo(() => repertoires.filter((r) => r.side === 'white'), [repertoires])
   const blackRepertoires = useMemo(() => repertoires.filter((r) => r.side === 'black'), [repertoires])
 
@@ -199,7 +224,6 @@ export function BuildMode() {
     const counts: RepertoireCounts = {}
     await Promise.all(
       reps.map(async (rep) => {
-        if (rep.id == null) return
         const moves = await listAllMoves(rep.id)
         counts[rep.id] = moves.length
       }),
@@ -240,6 +264,8 @@ export function BuildMode() {
       setSettingsOpen(false)
       setFlipBoard(false)
       setShowDests(true)
+      setShowBoardAnnotations(true)
+      setShapesByFen({})
       return
     }
 
@@ -269,12 +295,84 @@ export function BuildMode() {
       setSettingsOpen(false)
       setFlipBoard((rep?.side ?? 'white') === 'black')
       setShowDests(true)
+      setShowBoardAnnotations(false)
     })()
   }, [activeRepertoireId])
 
   useEffect(() => {
+    // Hide annotations by default in Train; keep whatever user had in Build.
+    if (mode === 'train') setShowBoardAnnotations(false)
+  }, [mode])
+
+  useEffect(() => {
+    // Depth base = path length at the start of the *current question position* (user to move).
+    if (mode !== 'train') {
+      lastTrainQuestionKeyRef.current = 'none'
+      setTrainDepthBase(0)
+      return
+    }
+    if (!trainRunActive) return
+    if (!isUsersTurn) return
+
+    const key = currentNodeId ?? null
+    if (lastTrainQuestionKeyRef.current !== key) {
+      lastTrainQuestionKeyRef.current = key
+      setTrainDepthBase(path.length)
+    }
+  }, [currentNodeId, isUsersTurn, mode, path.length, trainRunActive])
+
+  useEffect(() => {
     setHintStep(0)
   }, [children.length, currentFen, mode])
+
+  useEffect(() => {
+    // Don't keep half-finished arrows when position changes.
+    setPendingArrowFrom(null)
+  }, [annotationTool, currentFen])
+
+  const toggleShape = useCallback((shape: DrawShape) => {
+    setShapesByFen((prev) => {
+      const existing = prev[currentFen] ?? []
+      const same = (a: DrawShape, b: DrawShape) => a.orig === b.orig && a.dest === b.dest && a.brush === b.brush
+      const idx = existing.findIndex((s) => same(s, shape))
+      const next = idx >= 0 ? existing.filter((_, i) => i !== idx) : [...existing, shape]
+      return { ...prev, [currentFen]: next }
+    })
+  }, [currentFen])
+
+  const onAnnotateStart = useCallback(
+    (sq: Key) => {
+      if (mode !== 'build') return
+      if (annotationTool === 'none') return
+
+      // Ensure shapes are visible while using tools.
+      if (!showBoardAnnotations) setShowBoardAnnotations(true)
+      if (annotationTool === 'arrow') setPendingArrowFrom(sq)
+    },
+    [annotationTool, mode, showBoardAnnotations],
+  )
+
+  const onAnnotateEnd = useCallback(
+    (sq: Key) => {
+      if (mode !== 'build') return
+      if (annotationTool === 'none') return
+
+      if (!showBoardAnnotations) setShowBoardAnnotations(true)
+
+      const brush = annotationBrush as DrawShape['brush']
+      if (annotationTool === 'circle') {
+        toggleShape({ orig: sq, brush } as DrawShape)
+        return
+      }
+
+      const from = pendingArrowFrom
+      setPendingArrowFrom(null)
+      if (!from) return
+      if (from === sq) return
+      toggleShape({ orig: from, dest: sq, brush } as DrawShape)
+    },
+    [annotationBrush, annotationTool, mode, pendingArrowFrom, showBoardAnnotations, toggleShape],
+  )
 
   useEffect(() => {
     // Keep keyboard selection valid when variants change.
@@ -284,12 +382,12 @@ export function BuildMode() {
     })
   }, [children.length])
 
-  const refreshChildren = useCallback(async (repertoireId: number, parentId: number | null) => {
+  const refreshChildren = useCallback(async (repertoireId: string, parentId: string | null) => {
     const kids = await listChildrenMoves({ repertoireId, parentId })
     setChildren(kids)
   }, [])
 
-  const refreshAllMoves = useCallback(async (repertoireId: number) => {
+  const refreshAllMoves = useCallback(async (repertoireId: string) => {
     const moves = await listAllMoves(repertoireId)
     setAllMoves(moves)
   }, [])
@@ -312,10 +410,13 @@ export function BuildMode() {
     setTrainPassed(0)
     setTrainFailed(0)
     setTrainRunIndex(0)
+    setTrainCombo(0)
+    setTrainDepthBase(0)
+    lastTrainQuestionKeyRef.current = 'none'
   }, [])
 
   const replayToPositionId = useCallback(
-    async (posId: number | null) => {
+    async (posId: string | null) => {
       if (!activeRepertoireId) return
       if (posId == null) {
         await goToRoot()
@@ -343,7 +444,7 @@ export function BuildMode() {
           const partial = nextPath.slice(0, i + 1)
           const current = partial[partial.length - 1]!
           setPath(partial)
-          setCurrentNodeId(current.id ?? null)
+          setCurrentNodeId(current.id)
           await sleep(240)
         }
 
@@ -358,8 +459,8 @@ export function BuildMode() {
   const startTrainRun = useCallback(
     async (options?: {
       kind?: TrainRunKind
-      positions?: Array<number | null>
-      scopeRootId?: number | null
+      positions?: Array<string | null>
+      scopeRootId?: string | null
     }) => {
       if (!activeRepertoireId) return
       resetTrainRun()
@@ -381,16 +482,40 @@ export function BuildMode() {
     [activeRepertoireId, goToRoot, replayToPositionId, resetTrainRun],
   )
 
-  const markExplored = useCallback((parentId: number | null, childId: number | undefined) => {
+  const startRandomTrainRun = useCallback(
+    async (opts: { count: number; scopeSelection: boolean }) => {
+      const pool =
+        opts.scopeSelection && currentNodeId != null ? selectionTrainPositions : trainPositions
+      const max = pool.length
+      const n = Math.max(0, Math.min(opts.count, max))
+      if (n === 0) return
+
+      const copy = [...pool]
+      // Fisher–Yates shuffle (in place)
+      for (let i = copy.length - 1; i > 0; i -= 1) {
+        const j = Math.floor(Math.random() * (i + 1))
+        ;[copy[i], copy[j]] = [copy[j], copy[i]]
+      }
+      const picked = copy.slice(0, n)
+      await startTrainRun({
+        kind: 'random',
+        positions: picked,
+        scopeRootId: opts.scopeSelection ? currentNodeId : null,
+      })
+    },
+    [currentNodeId, selectionTrainPositions, startTrainRun, trainPositions],
+  )
+
+  const markExplored = useCallback((parentId: string | null, childId: string | undefined) => {
     if (childId == null) return
     const m = exploredByParentRef.current
-    const set = m.get(parentId) ?? new Set<number>()
+    const set = m.get(parentId) ?? new Set<string>()
     set.add(childId)
     m.set(parentId, set)
   }, [])
 
   const truncatePathToNodeId = useCallback(
-    (nodeId: number | null) => {
+    (nodeId: string | null) => {
       if (nodeId == null) return []
       const idx = path.findIndex((m) => m.id === nodeId)
       if (idx === -1) return []
@@ -416,8 +541,8 @@ export function BuildMode() {
         markExplored(parentId, currentMove.id)
 
         const siblings = await listChildrenMoves({ repertoireId: activeRepertoireId, parentId })
-        const explored = exploredByParentRef.current.get(parentId) ?? new Set<number>()
-        const remaining = siblings.filter((m) => m.id != null && !explored.has(m.id))
+        const explored = exploredByParentRef.current.get(parentId) ?? new Set<string>()
+        const remaining = siblings.filter((m) => !explored.has(m.id))
 
         if (remaining.length > 0) {
           // Jump back to that parent position, continue from the next variation.
@@ -449,7 +574,7 @@ export function BuildMode() {
     if (path.length === 0) return
     const nextPath = path.slice(0, -1)
     setPath(nextPath)
-    const nextNodeId = nextPath.length ? (nextPath[nextPath.length - 1]!.id ?? null) : null
+    const nextNodeId = nextPath.length ? nextPath[nextPath.length - 1]!.id : null
     setCurrentNodeId(nextNodeId)
     setSelectedChildIndex(0)
     setRevealed(null)
@@ -467,10 +592,10 @@ export function BuildMode() {
     }
     nextPath.reverse()
     setPath(nextPath)
-    setCurrentNodeId(move.id ?? null)
+    setCurrentNodeId(move.id)
     setSelectedChildIndex(0)
     setRevealed(null)
-    await refreshChildren(activeRepertoireId, move.id ?? null)
+    await refreshChildren(activeRepertoireId, move.id)
   }, [activeRepertoireId, movesById, refreshChildren])
 
   useEffect(() => {
@@ -513,7 +638,7 @@ export function BuildMode() {
     return () => window.removeEventListener('keydown', handler)
   }, [activeRepertoireId, busy, children, goBack, mode, selectVariant, selectedChildIndex])
 
-  const onBoardMoveBuild = async (from: Key, to: Key) => {
+  const applyBuildMove = async (from: Key, to: Key, promotion?: string) => {
     if (!activeRepertoireId || !activeRepertoire) return
     if (busy) return
 
@@ -525,7 +650,7 @@ export function BuildMode() {
       const c = new Chess()
       c.load(currentFen)
 
-      const move = c.move({ from, to, promotion: 'q' })
+      const move = c.move({ from, to, promotion: promotion ?? 'q' })
       if (!move) return
 
       const notation = move.san
@@ -584,6 +709,22 @@ export function BuildMode() {
     }
   }
 
+  const onBoardMoveBuild = async (from: Key, to: Key) => {
+    await applyBuildMove(from, to, 'q')
+  }
+
+  const onPlayExplorerMove = useCallback(
+    async (uci: string) => {
+      const s = uci.trim()
+      if (s.length < 4) return
+      const from = s.slice(0, 2) as Key
+      const to = s.slice(2, 4) as Key
+      const promotion = s.length >= 5 ? s.slice(4, 5) : undefined
+      await applyBuildMove(from, to, promotion)
+    },
+    [applyBuildMove],
+  )
+
   const onBoardMoveTrain = async (from: Key, to: Key) => {
     if (!activeRepertoireId || !activeRepertoire) return
     if (busy) return
@@ -608,6 +749,7 @@ export function BuildMode() {
         setToast({ type: 'info', message: 'Incorrect.' })
         setTrainMissPulse(true)
         window.setTimeout(() => setTrainMissPulse(false), 450)
+        setTrainCombo(0)
         if (trainRunActive) {
           const posKey = parentId ?? null
           if (!failedPositionsRef.current.has(posKey)) {
@@ -615,11 +757,21 @@ export function BuildMode() {
             setTrainFailed((n) => n + 1)
           }
         }
+
+        if (trainRunActive && trainRunKind === 'random' && trainRunPositions) {
+          const nextIdx = trainRunIndex + 1
+          setTrainRunIndex(nextIdx)
+          const nextPos = trainRunPositions[nextIdx]
+          if (nextPos !== undefined) {
+            await replayToPositionId(nextPos)
+          }
+        }
         return
       }
 
       await selectVariant(match)
       markExplored(parentId ?? null, match.id)
+      setTrainCombo((c) => c + 1)
       if (trainRunActive) {
         const posKey = parentId ?? null
         if (!passedPositionsRef.current.has(posKey)) {
@@ -628,7 +780,7 @@ export function BuildMode() {
         }
       }
 
-      if (trainRunActive && trainRunKind === 'failed' && trainRunPositions) {
+      if (trainRunActive && (trainRunKind === 'failed' || trainRunKind === 'random') && trainRunPositions) {
         const nextIdx = trainRunIndex + 1
         setTrainRunIndex(nextIdx)
         const nextPos = trainRunPositions[nextIdx]
@@ -653,8 +805,8 @@ export function BuildMode() {
 
     if (children.length === 0) return
 
-    const explored = exploredByParentRef.current.get(currentNodeId ?? null) ?? new Set<number>()
-    const unexplored = children.filter((m) => m.id != null && !explored.has(m.id))
+    const explored = exploredByParentRef.current.get(currentNodeId ?? null) ?? new Set<string>()
+    const unexplored = children.filter((m) => !explored.has(m.id))
     const pool = unexplored.length > 0 ? unexplored : children
     const opponentMove = pool[Math.floor(Math.random() * pool.length)]
     if (!opponentMove) return
@@ -753,7 +905,7 @@ export function BuildMode() {
   const onDeleteMove = useCallback(
     async (move: Move) => {
       if (!activeRepertoireId) return
-      if (move.id == null) return
+      if (!move.id) return
       setModal({ kind: 'confirmDeleteMove', move })
       return
 
@@ -761,11 +913,124 @@ export function BuildMode() {
     [activeRepertoireId],
   )
 
+  const selectedMove = useMemo(() => {
+    if (currentNodeId == null) return null
+    return movesById.get(currentNodeId) ?? null
+  }, [currentNodeId, movesById])
+
+  const [moveNagDraft, setMoveNagDraft] = useState('')
+  const [moveCommentDraft, setMoveCommentDraft] = useState('')
+
+  const formatNagForInline = useCallback((raw: string | undefined | null) => {
+    const s = (raw ?? '').trim()
+    if (!s) return ''
+    const tokens = s
+      .split(/\s+/)
+      .map((t) => {
+        const tt = t.trim()
+        if (!tt) return ''
+        if (tt.startsWith('$')) {
+          const n = Number(tt.slice(1))
+          if (!Number.isFinite(n)) return tt
+          switch (n) {
+            case 1:
+              return '!'
+            case 2:
+              return '?'
+            case 3:
+              return '!!'
+            case 4:
+              return '??'
+            case 5:
+              return '!?'
+            case 6:
+              return '?!'
+            case 10:
+              return '='
+            case 13:
+              return '∞'
+            case 14:
+              return '+='
+            case 15:
+              return '=+'
+            case 16:
+              return '+-'
+            case 17:
+              return '-+'
+            default:
+              return tt
+          }
+        }
+        return tt
+      })
+      .filter(Boolean)
+
+    if (tokens.length === 0) return ''
+    const glued = tokens.join('')
+    return /^(?:!|\?|!!|\?\?|!\?|\?!)+$/.test(glued) ? glued : ` ${glued}`
+  }, [])
+
+  useEffect(() => {
+    if (!selectedMove) {
+      setMoveNagDraft('')
+      setMoveCommentDraft('')
+      return
+    }
+    setMoveNagDraft(selectedMove.nag ?? '')
+    setMoveCommentDraft(selectedMove.comment ?? '')
+  }, [selectedMove])
+
+  const saveMoveMeta = useCallback(async () => {
+    if (!activeRepertoireId) return
+    if (!selectedMove?.id) return
+    setBusy(true)
+    setToast(null)
+    try {
+      await updateMove(selectedMove.id, {
+        nag: moveNagDraft,
+        comment: moveCommentDraft,
+      })
+      await refreshAllMoves(activeRepertoireId)
+      await refreshRepertoireOverview()
+    } catch {
+      setToast({ type: 'error', message: "Impossible d'enregistrer le commentaire." })
+    } finally {
+      setBusy(false)
+    }
+  }, [
+    activeRepertoireId,
+    moveCommentDraft,
+    moveNagDraft,
+    refreshAllMoves,
+    refreshRepertoireOverview,
+    selectedMove?.id,
+  ])
+
   return (
     <div className="flex flex-1 flex-col gap-6 px-4 py-8">
+      {view === 'session' ? (
+        <button
+          type="button"
+          className="fixed right-4 top-4 z-40 counter"
+          aria-label="Paramètres de l'échiquier"
+          onClick={() => setSettingsOpen(true)}
+          title="Paramètres"
+        >
+          ⚙
+        </button>
+      ) : null}
       {view === 'home' ? (
         <div className="mx-auto w-full max-w-[920px] text-left">
-          <h1>Répertoires</h1>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <h1>Répertoires</h1>
+            <button
+              type="button"
+              className="counter text-sm"
+              onClick={() => void getSupabaseClient().auth.signOut()}
+            >
+              Déconnexion
+            </button>
+          </div>
           <p>Sélectionne un répertoire pour ouvrir Build/Train.</p>
 
           <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-[1fr_340px]">
@@ -820,14 +1085,6 @@ export function BuildMode() {
                 <button type="button" className="counter" onClick={() => setView('home')}>
                   Home
                 </button>
-                <button
-                  type="button"
-                  className="counter"
-                  aria-label="Paramètres de l'échiquier"
-                  onClick={() => setSettingsOpen(true)}
-                >
-                  ⚙
-                </button>
                 <button type="button" className="counter" onClick={() => setMode('build')}>
                   Build
                 </button>
@@ -839,12 +1096,20 @@ export function BuildMode() {
                 <div className={trainMissPulse ? 'train-miss-shake' : ''}>
                   <Board
                     fen={currentFen}
-                    dests={!isUsersTurn ? new Map() : showDests ? dests : new Map<Key, Key[]>()}
+                    dests={!isUsersTurn ? new Map() : dests}
+                    showDests={showDests}
                     turnColor={turnColor}
                     orientation={boardOrientation}
                     onMove={onBoardMoveTrain}
                     lastMove={undefined}
                     selectedSquare={hintSelectedSquare}
+                    drawableEnabled={showBoardAnnotations}
+                    drawableVisible={showBoardAnnotations}
+                    shapes={currentShapes}
+                    onShapesChange={(next) => {
+                      setShapesByFen((prev) => ({ ...prev, [currentFen]: next }))
+                    }}
+                    annotationMode={false}
                   />
                 </div>
 
@@ -868,12 +1133,25 @@ export function BuildMode() {
                             style={{ width: `${trainTotal === 0 ? 0 : (trainPassed / trainTotal) * 100}%` }}
                           />
                         </div>
-                        <div className="mt-2 text-xs opacity-80">
-                          Restantes: {trainRemaining} · Passées: {trainPassed} · Failed: {trainFailed}
+                        <div className="mt-2 flex items-center justify-between gap-2 text-xs opacity-80">
+                          <div>
+                            Restantes: {trainRemaining} · Passées: {trainPassed} · Failed: {trainFailed}
+                          </div>
+                          <div className="font-mono">Profondeur = {Math.max(0, path.length - trainDepthBase)}</div>
                         </div>
                       </>
                     ) : null}
                   </div>
+
+                  {trainCombo >= 3 ? (
+                    <div
+                      className="flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--bg)] px-2 py-1 text-xs font-medium text-[var(--text-h)]"
+                      title="Combo"
+                    >
+                      <span className="select-none">🔥</span>
+                      <span className="font-mono">{trainCombo}</span>
+                    </div>
+                  ) : null}
 
                   <button
                     type="button"
@@ -882,6 +1160,14 @@ export function BuildMode() {
                     onClick={() => {
                       if (!isUsersTurn) return
                       if (!hintMoveKeys) return
+                      if (trainRunActive) {
+                        const posKey = currentNodeId ?? null
+                        if (!failedPositionsRef.current.has(posKey)) {
+                          failedPositionsRef.current.add(posKey)
+                          setTrainFailed((n) => n + 1)
+                        }
+                      }
+                      setTrainCombo(0)
                       setHintStep((prev) => (prev === 0 ? 1 : prev === 1 ? 2 : 0))
                     }}
                   >
@@ -969,14 +1255,6 @@ export function BuildMode() {
                   >
                     Train
                   </button>
-                  <button
-                    type="button"
-                    className="counter"
-                    aria-label="Paramètres de l'échiquier"
-                    onClick={() => setSettingsOpen(true)}
-                  >
-                    ⚙
-                  </button>
                   <button type="button" className="counter" onClick={() => setView('home')}>
                     Home
                   </button>
@@ -991,7 +1269,10 @@ export function BuildMode() {
                   id="repSelect"
                   className="mt-2 w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2"
                   value={activeRepertoireId ?? ''}
-                  onChange={(e) => setActiveRepertoireId(Number(e.target.value))}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    setActiveRepertoireId(v === '' ? null : v)
+                  }}
                 >
                   <option value="" disabled>
                     —
@@ -1013,6 +1294,62 @@ export function BuildMode() {
                 />
               </div>
 
+              {mode === 'build' && selectedMove ? (
+                <div className="mt-4 rounded-md border border-[var(--border)] bg-[var(--bg)] p-3 text-left text-sm">
+                  <div className="text-xs font-medium text-[var(--text-h)]">Coup</div>
+                  <div className="mt-1 font-mono text-[var(--text-h)]">
+                    {selectedMove.notation}
+                    {formatNagForInline(selectedMove.nag)}
+                  </div>
+
+                  <label className="mt-3 block text-xs font-medium text-[var(--text-h)]" htmlFor="nagSelect">
+                    Annotation PGN
+                  </label>
+                  <select
+                    id="nagSelect"
+                    className="mt-2 w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2"
+                    value={moveNagDraft}
+                    onChange={(e) => setMoveNagDraft(e.target.value)}
+                    disabled={busy}
+                  >
+                    <option value="">(aucune)</option>
+                    <option value="!">!</option>
+                    <option value="?">?</option>
+                    <option value="!!">!!</option>
+                    <option value="??">??</option>
+                    <option value="!?">!?</option>
+                    <option value="?!">?!</option>
+                    <option value="=">=</option>
+                    <option value="+/=">+/=</option>
+                    <option value="=/+">=/+</option>
+                    <option value="+-">+-</option>
+                    <option value="-+">-+</option>
+                    <option value="∞">∞</option>
+                  </select>
+
+                  <label
+                    className="mt-3 block text-xs font-medium text-[var(--text-h)]"
+                    htmlFor="commentInput"
+                  >
+                    Commentaire
+                  </label>
+                  <textarea
+                    id="commentInput"
+                    className="mt-2 w-full resize-none rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2"
+                    rows={3}
+                    value={moveCommentDraft}
+                    onChange={(e) => setMoveCommentDraft(e.target.value)}
+                    disabled={busy}
+                  />
+
+                  <div className="mt-3 flex justify-end">
+                    <button type="button" className="counter" disabled={busy} onClick={() => void saveMoveMeta()}>
+                      Save
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
               {toast && (
                 <div
                   className="mt-4 rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm"
@@ -1026,15 +1363,83 @@ export function BuildMode() {
 
             <main className="rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-4 shadow-[var(--shadow)]">
               <div className="mx-auto w-full max-w-[420px]">
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2">
+                      {(
+                        [
+                          { id: 'green', cls: 'bg-green-500' },
+                          { id: 'red', cls: 'bg-red-500' },
+                          { id: 'blue', cls: 'bg-blue-500' },
+                        ] as const
+                      ).map((c) => (
+                        <button
+                          key={c.id}
+                          type="button"
+                          className={[
+                            'h-5 w-5 rounded-full border border-[var(--border)]',
+                            c.cls,
+                            annotationBrush === c.id ? 'ring-2 ring-[var(--accent)] ring-offset-2 ring-offset-[var(--social-bg)]' : '',
+                          ].join(' ')}
+                          onClick={() => setAnnotationBrush(c.id)}
+                          aria-label={`Couleur ${c.id}`}
+                          title={`Couleur ${c.id}`}
+                        />
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      className={[
+                        'counter !px-2 !py-1',
+                        annotationTool === 'arrow' ? 'bg-[var(--accent)] text-white ring-2 ring-[var(--accent)]' : '',
+                      ].join(' ')}
+                      onClick={() => setAnnotationTool((t) => (t === 'arrow' ? 'none' : 'arrow'))}
+                      aria-pressed={annotationTool === 'arrow'}
+                      title="Flèches (drag)"
+                    >
+                      ↗
+                    </button>
+                    <button
+                      type="button"
+                      className={[
+                        'counter !px-2 !py-1',
+                        annotationTool === 'circle' ? 'bg-[var(--accent)] text-white ring-2 ring-[var(--accent)]' : '',
+                      ].join(' ')}
+                      onClick={() => setAnnotationTool((t) => (t === 'circle' ? 'none' : 'circle'))}
+                      aria-pressed={annotationTool === 'circle'}
+                      title="Cercles (1 clic)"
+                    >
+                      ◯
+                    </button>
+                  </div>
+                </div>
                 <Board
                   fen={currentFen}
-                  dests={boardDests}
+                  dests={isAnnotating ? new Map<Key, Key[]>() : boardDests}
                   turnColor={turnColor}
                   orientation={boardOrientation}
-                  onMove={onBoardMoveBuild}
+                  onMove={isAnnotating ? undefined : onBoardMoveBuild}
                   lastMove={undefined}
-                  selectedSquare={null}
+                  selectedSquare={annotationTool === 'arrow' ? pendingArrowFrom : null}
+                  drawableEnabled={showBoardAnnotations}
+                  drawableVisible={showBoardAnnotations && mode === 'build'}
+                  shapes={currentShapes}
+                  onShapesChange={(next) => {
+                    setShapesByFen((prev) => ({ ...prev, [currentFen]: next }))
+                  }}
+                  annotationMode={isAnnotating}
+                  onAnnotateStart={onAnnotateStart}
+                  onAnnotateEnd={onAnnotateEnd}
                 />
+
+                {mode === 'build' ? (
+                  <OpeningExplorer
+                    fen={currentFen}
+                    collapsed={openingExplorerCollapsed}
+                    onToggleCollapsed={() => setOpeningExplorerCollapsed((v) => !v)}
+                    onPlayMove={(uci) => void onPlayExplorerMove(uci)}
+                  />
+                ) : null}
               </div>
             </main>
           </div>
@@ -1073,6 +1478,23 @@ export function BuildMode() {
               >
                 Variante sélectionnée
               </button>
+              <button
+                type="button"
+                className="counter"
+                disabled={modal.fullCount === 0}
+                onClick={() => {
+                  setModal({
+                    kind: 'trainRandomConfig',
+                    maxCount: modal.fullCount,
+                    hasSelection: modal.hasSelection,
+                    selectionMaxCount: modal.selectionCount,
+                  })
+                  setRandomScopeSelected(false)
+                  setRandomCountDraft(Math.min(10, modal.fullCount))
+                }}
+              >
+                Positions aléatoires
+              </button>
             </div>
           }
         >
@@ -1092,6 +1514,72 @@ export function BuildMode() {
           {modal.fullCount === 0 ? (
             <div className="mt-2 text-sm opacity-80">Aucune position entraînable trouvée.</div>
           ) : null}
+        </ModalFrame>
+      ) : null}
+
+      {modal?.kind === 'trainRandomConfig' ? (
+        <ModalFrame
+          title="Positions aléatoires"
+          onClose={() => setModal(null)}
+          actions={
+            <div className="flex gap-2">
+              <button type="button" className="counter" onClick={() => setModal(null)}>
+                Annuler
+              </button>
+              <button
+                type="button"
+                className="counter"
+                disabled={
+                  (randomScopeSelected ? modal.selectionMaxCount : modal.maxCount) === 0 ||
+                  randomCountDraft <= 0
+                }
+                onClick={() => {
+                  const max = randomScopeSelected ? modal.selectionMaxCount : modal.maxCount
+                  const n = Math.max(1, Math.min(randomCountDraft, max))
+                  setModal(null)
+                  void startRandomTrainRun({ count: n, scopeSelection: randomScopeSelected })
+                }}
+              >
+                Démarrer
+              </button>
+            </div>
+          }
+        >
+          <div className="space-y-3 text-sm">
+            <div>
+              Nombre de positions (max{' '}
+              <span className="font-mono">{randomScopeSelected ? modal.selectionMaxCount : modal.maxCount}</span>)
+            </div>
+            <input
+              type="number"
+              min={1}
+              max={randomScopeSelected ? modal.selectionMaxCount : modal.maxCount}
+              className="w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2 font-mono"
+              value={randomCountDraft}
+              onChange={(e) => setRandomCountDraft(Number(e.target.value))}
+            />
+
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-[var(--text-h)]">Se concentrer sur la variante sélectionnée</span>
+              <button
+                type="button"
+                className={`toggle-switch ${randomScopeSelected ? 'is-on' : ''}`}
+                role="switch"
+                aria-checked={randomScopeSelected}
+                disabled={!modal.hasSelection}
+                onClick={() => {
+                  if (!modal.hasSelection) return
+                  setRandomScopeSelected((v) => !v)
+                }}
+                title={!modal.hasSelection ? 'Sélectionne un coup dans l’arbre pour activer.' : ''}
+              >
+                <span className="toggle-thumb" />
+              </button>
+            </div>
+            {!modal.hasSelection ? (
+              <div className="text-xs opacity-80">Sélectionne un coup dans l’arbre pour activer ce mode.</div>
+            ) : null}
+          </div>
         </ModalFrame>
       ) : null}
 
@@ -1150,7 +1638,7 @@ export function BuildMode() {
                   if (modal?.kind !== 'confirmDeleteMove') return
                   const move = modal.move
                   const rootMoveId = move.id
-                  if (!activeRepertoireId || rootMoveId == null) return
+                  if (!activeRepertoireId || !rootMoveId) return
                   setModal(null)
                   void (async () => {
                     setBusy(true)
@@ -1164,7 +1652,7 @@ export function BuildMode() {
                       if (isInPath) {
                         const nextPath = move.parentId == null ? [] : truncatePathToNodeId(move.parentId)
                         setPath(nextPath)
-                        const nextNodeId = nextPath.length ? (nextPath[nextPath.length - 1]!.id ?? null) : null
+                        const nextNodeId = nextPath.length ? nextPath[nextPath.length - 1]!.id : null
                         setCurrentNodeId(nextNodeId)
                         await refreshChildren(activeRepertoireId, move.parentId)
                       } else {
@@ -1194,10 +1682,12 @@ export function BuildMode() {
           fen={currentFen}
           flipBoard={flipBoard}
           showDests={showDests}
+          showBoardAnnotations={showBoardAnnotations}
           onClose={() => setSettingsOpen(false)}
           onCopyFen={() => void navigator.clipboard.writeText(currentFen)}
           onToggleFlip={() => setFlipBoard((v) => !v)}
           onToggleDests={() => setShowDests((v) => !v)}
+          onToggleAnnotations={() => setShowBoardAnnotations((v) => !v)}
         />
       ) : null}
     </div>
@@ -1270,18 +1760,22 @@ function SettingsPopup({
   fen,
   flipBoard,
   showDests,
+  showBoardAnnotations,
   onClose,
   onCopyFen,
   onToggleFlip,
   onToggleDests,
+  onToggleAnnotations,
 }: {
   fen: string
   flipBoard: boolean
   showDests: boolean
+  showBoardAnnotations: boolean
   onClose: () => void
   onCopyFen: () => void
   onToggleFlip: () => void
   onToggleDests: () => void
+  onToggleAnnotations: () => void
 }) {
   return (
     <ModalFrame
@@ -1292,6 +1786,11 @@ function SettingsPopup({
       <div className="space-y-4 text-left text-sm">
         <ToggleRow label="Inverser l'échiquier" checked={flipBoard} onChange={onToggleFlip} />
         <ToggleRow label="Afficher les destinations" checked={showDests} onChange={onToggleDests} />
+        <ToggleRow
+          label="Afficher annotations"
+          checked={showBoardAnnotations}
+          onChange={onToggleAnnotations}
+        />
         <div>
           <div className="mb-1 flex items-center justify-between gap-2">
             <span className="text-[var(--text-h)]">FEN</span>
@@ -1342,7 +1841,7 @@ function HomeSection({
   title: string
   repertoires: Repertoire[]
   repertoireCounts: RepertoireCounts
-  onOpen: (id: number) => void
+  onOpen: (id: string) => void
 }) {
   return (
     <section>
@@ -1357,12 +1856,12 @@ function HomeSection({
               type="button"
               className="w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-left hover:shadow-[var(--shadow)]"
               onClick={() => {
-                if (r.id != null) onOpen(r.id)
+                onOpen(r.id)
               }}
             >
               <div className="text-sm font-medium text-[var(--text-h)]">{r.title}</div>
               <div className="mt-0.5 text-xs opacity-80">
-                {repertoireCounts[r.id ?? -1] ?? 0} positions enregistrées
+                {repertoireCounts[r.id] ?? 0} positions enregistrées
               </div>
             </button>
           ))

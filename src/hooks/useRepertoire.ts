@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from 'react'
-import { db, type Move, type Repertoire, type Side } from '../db/schema'
+import type { Move, Side } from '../db/schema'
+import { addMove as addMoveDb, createRepertoire as createRepertoireDb } from '../db/repertoireRepo'
 
 export type CreateRepertoireInput = {
   title: string
@@ -7,12 +8,13 @@ export type CreateRepertoireInput = {
 }
 
 export type AddMoveInput = {
-  repertoireId: number
-  parentId: number | null
+  repertoireId: string
+  parentId: string | null
   fen: string
   notation: string
   comment?: string
   eval?: number
+  nag?: string
 }
 
 export function useRepertoire() {
@@ -23,13 +25,7 @@ export function useRepertoire() {
     setLoading(true)
     setError(null)
     try {
-      const repertoire: Repertoire = {
-        title: input.title,
-        side: input.side,
-        createdAt: Date.now(),
-      }
-      const id = await db.repertoires.add(repertoire)
-      return id
+      return await createRepertoireDb({ title: input.title, side: input.side })
     } catch (e) {
       setError(e)
       throw e
@@ -42,16 +38,16 @@ export function useRepertoire() {
     setLoading(true)
     setError(null)
     try {
-      const move: Move = {
+      const move: Omit<Move, 'id' | 'createdAt'> = {
         repertoireId: input.repertoireId,
         parentId: input.parentId,
         fen: input.fen,
         notation: input.notation,
+        nag: input.nag,
         comment: input.comment ?? '',
         eval: input.eval,
       }
-      const id = await db.moves.add(move)
-      return id
+      return await addMoveDb(move)
     } catch (e) {
       setError(e)
       throw e
@@ -70,4 +66,3 @@ export function useRepertoire() {
     [addMove, createRepertoire, error, loading],
   )
 }
-

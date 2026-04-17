@@ -4,14 +4,14 @@ import type { MoveForest, MoveNode } from '../../chess/moveTree'
 
 type Props = {
   forest: MoveForest
-  pathIds: Set<number>
+  pathIds: Set<string>
   onSelectMove: (move: Move) => void | Promise<void>
   onDeleteMove?: (move: Move) => void | Promise<void>
 }
 
 export function MoveTreeView({ forest, pathIds, onSelectMove, onDeleteMove }: Props) {
   const [expandedVarKeys, setExpandedVarKeys] = useState<Set<string>>(() => new Set())
-  const [expandedContinuationIds, setExpandedContinuationIds] = useState<Set<number>>(() => new Set())
+  const [expandedContinuationIds, setExpandedContinuationIds] = useState<Set<string>>(() => new Set())
 
   const ctx = useMemo(
     () => ({
@@ -35,13 +35,66 @@ export function MoveTreeView({ forest, pathIds, onSelectMove, onDeleteMove }: Pr
 type Ctx = {
   expandedVarKeys: Set<string>
   setExpandedVarKeys: Dispatch<SetStateAction<Set<string>>>
-  expandedContinuationIds: Set<number>
-  setExpandedContinuationIds: Dispatch<SetStateAction<Set<number>>>
+  expandedContinuationIds: Set<string>
+  setExpandedContinuationIds: Dispatch<SetStateAction<Set<string>>>
+}
+
+function normalizeNagToken(t: string): string {
+  const s = t.trim()
+  if (!s) return ''
+  if (s.startsWith('$')) {
+    const n = Number(s.slice(1))
+    if (!Number.isFinite(n)) return s
+    // Common PGN NAGs
+    switch (n) {
+      case 1:
+        return '!'
+      case 2:
+        return '?'
+      case 3:
+        return '!!'
+      case 4:
+        return '??'
+      case 5:
+        return '!?'
+      case 6:
+        return '?!'
+      case 10:
+        return '='
+      case 13:
+        return '∞'
+      case 14:
+        return '+='
+      case 15:
+        return '=+'
+      case 16:
+        return '+-'
+      case 17:
+        return '-+'
+      default:
+        return s
+    }
+  }
+  return s
+}
+
+function formatMoveWithNag(move: Move): string {
+  const raw = move.nag?.trim() ?? ''
+  if (!raw) return move.notation
+
+  // Allow either a single token ("!?") or space-separated tokens ("$1 $14").
+  const tokens = raw.split(/\s+/).map(normalizeNagToken).filter(Boolean)
+  if (tokens.length === 0) return move.notation
+
+  const glued = tokens.join('')
+  // Standard “quality” glyphs stick to the move; other annotations keep a space.
+  const stickToMove = /^(?:!|\?|!!|\?\?|!\?|\?!)+$/.test(glued)
+  return stickToMove ? `${move.notation}${glued}` : `${move.notation} ${glued}`
 }
 
 function renderForest(
   forest: MoveForest,
-  pathIds: Set<number>,
+  pathIds: Set<string>,
   onSelectMove: Props['onSelectMove'],
   onDeleteMove: Props['onDeleteMove'],
   depth: number,
@@ -79,7 +132,9 @@ function renderForest(
           >
             <span className="font-mono">{varsExpanded ? '▾' : '▸'}</span>
                 <span className="opacity-80">
-                  {vars[0]?.move.notation ? `${moveNumberPrefix(depth, true)}${vars[0].move.notation}` : ''}
+                  {vars[0]?.move.notation
+                    ? `${moveNumberPrefix(depth, true)}${formatMoveWithNag(vars[0].move)}`
+                    : ''}
                 </span>
           </button>
 
@@ -108,7 +163,7 @@ function moveNumberPrefix(depth: number, atLineStart: boolean): string {
 
 function renderLine(
   node: MoveNode,
-  pathIds: Set<number>,
+  pathIds: Set<string>,
   onSelectMove: Props['onSelectMove'],
   onDeleteMove: Props['onDeleteMove'],
   depth: number,
@@ -138,7 +193,7 @@ function renderLine(
     >
       <span>
         {prefix}
-        {node.move.notation}
+        {formatMoveWithNag(node.move)}
       </span>
     </button>
   )

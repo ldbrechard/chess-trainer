@@ -1,39 +1,28 @@
-import Dexie, { type Table } from 'dexie'
-
 export type Side = 'white' | 'black'
 
+export type RepertoireId = string
+export type MoveId = string
+
 export type Repertoire = {
-  id?: number
+  id: RepertoireId
   title: string
   side: Side
   createdAt: number
 }
 
 export type Move = {
-  id?: number
-  repertoireId: number
-  parentId: number | null
+  id: MoveId
+  repertoireId: RepertoireId
+  parentId: MoveId | null
   fen: string
   notation: string
+  /**
+   * PGN NAG-like annotation (e.g. "!", "?!", "=").
+   * Stored separately from SAN notation.
+   */
+  nag?: string
   comment: string
   eval?: number
+  /** ISO timestamp from DB; used for stable sibling ordering */
+  createdAt?: string
 }
-
-export class ChessTrainerDB extends Dexie {
-  repertoires!: Table<Repertoire, number>
-  moves!: Table<Move, number>
-
-  constructor() {
-    super('ChessTrainerDB')
-
-    this.version(1).stores({
-      // Common list queries: by side, sort by createdAt
-      repertoires: '++id, side, createdAt',
-      // Tree queries: children by (repertoireId, parentId); transpositions by fen
-      moves: '++id, repertoireId, parentId, fen, [repertoireId+parentId], [repertoireId+fen]',
-    })
-  }
-}
-
-export const db = new ChessTrainerDB()
-
