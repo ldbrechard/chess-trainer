@@ -152,6 +152,40 @@ code,
   pointer-events: none;
 }
 
+/* Boutons compacts mode train (même accent que .counter dans App.css) */
+.train-accent-btn {
+  font-family: var(--mono);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  font-size: 10px;
+  line-height: 1;
+  padding: 4px 7px;
+  color: var(--accent);
+  background: var(--accent-bg);
+  border: 2px solid transparent;
+  transition: border-color 0.2s ease;
+}
+
+.train-accent-btn:hover:not(:disabled) {
+  border-color: var(--accent-border);
+}
+
+.train-accent-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.train-accent-btn--icon {
+  width: 22px;
+  height: 22px;
+  min-width: 22px;
+  padding: 0;
+  font-size: 11px;
+}
+
 .toggle-switch {
   position: relative;
   display: inline-flex;
@@ -182,9 +216,42 @@ code,
   transform: translateX(16px);
 }
 
+.toggle-switch.toggle-switch--sm {
+  display: inline-flex;
+  align-items: center;
+  width: 28px;
+  height: 15px;
+  flex-shrink: 0;
+}
+
+.toggle-switch.toggle-switch--sm .toggle-thumb {
+  width: 11px;
+  height: 11px;
+  margin-left: 2px;
+}
+
+.toggle-switch.toggle-switch--sm.is-on .toggle-thumb {
+  transform: translateX(13px);
+}
+
 code {
   font-size: 15px;
   line-height: 135%;
   padding: 4px 8px;
   background: var(--code-bg);
+}
+
+/* Panneau menu profil : fond blanc opaque (lisible sur l’échiquier derrière) */
+.profile-drawer {
+  --text: #6b6375;
+  --text-h: #08060d;
+  --border: #e5e4e7;
+  --social-bg: #f4f3ec;
+  --bg: #ffffff;
+  --code-bg: #f4f3ec;
+  --accent: #aa3bff;
+  --accent-bg: rgba(170, 59, 255, 0.12);
+  --accent-border: rgba(170, 59, 255, 0.45);
+  background: #ffffff;
+  color: var(--text-h);
 }

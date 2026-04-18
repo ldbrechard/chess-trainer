@@ -1,7 +1,13 @@
 import { useState } from 'react'
 import { getSupabaseClient } from '../lib/supabaseClient'
 
-export function AuthScreen() {
+type Props = {
+  /** When true, tighter copy for modal overlay */
+  embedded?: boolean
+  onAuthenticated?: () => void
+}
+
+export function AuthScreen({ embedded, onAuthenticated }: Props) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [mode, setMode] = useState<'signin' | 'signup'>('signin')
@@ -26,6 +32,7 @@ export function AuthScreen() {
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email: em, password })
         if (error) throw error
+        onAuthenticated?.()
       }
     } catch (err) {
       setMessage(err instanceof Error ? err.message : 'Erreur de connexion.')
@@ -38,7 +45,11 @@ export function AuthScreen() {
     <div className="mx-auto flex w-full max-w-md flex-col gap-6 px-4 py-16 text-left text-[var(--text-h)]">
       <div>
         <h1 className="text-2xl font-semibold">Chess Trainer</h1>
-        <p className="mt-2 text-sm opacity-80">Connecte-toi pour accéder à tes répertoires (Supabase).</p>
+        <p className="mt-2 text-sm opacity-80">
+          {embedded
+            ? 'Connecte-toi pour synchroniser tes répertoires avec le cloud.'
+            : 'Connecte-toi pour synchroniser tes répertoires (Supabase).'}
+        </p>
       </div>
 
       <div className="flex gap-2">

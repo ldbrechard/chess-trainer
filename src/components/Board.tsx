@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef } from 'react'
 import { Chessground } from 'chessground'
 import type { Api } from 'chessground/api'
 import type { DrawShape } from 'chessground/draw'
@@ -7,6 +7,8 @@ import type { Key } from 'chessground/types'
 import 'chessground/assets/chessground.base.css'
 import 'chessground/assets/chessground.brown.css'
 import 'chessground/assets/chessground.cburnett.css'
+
+type AnnotateVariant = 'arrow' | 'circle'
 
 type Props = {
   fen: string
@@ -19,11 +21,15 @@ type Props = {
   drawableEnabled?: boolean
   drawableVisible?: boolean
   shapes?: DrawShape[]
+  /** Shapes affichées mais non persistées (ex. prévisualisation de flèche au drag) */
+  annotationAutoShapes?: DrawShape[]
   onShapesChange?: (shapes: DrawShape[]) => void
   onMove?: (from: Key, to: Key) => void | Promise<void>
   annotationMode?: boolean
+  annotateVariant?: AnnotateVariant | null
   onAnnotateStart?: (square: Key) => void
-  onAnnotateEnd?: (square: Key) => void
+  onAnnotateMove?: (square: Key | null) => void
+  onAnnotateEnd?: (square: Key | null) => void
 }
 
 export function Board({
@@ -37,16 +43,42 @@ export function Board({
   drawableEnabled = false,
   drawableVisible = false,
   shapes = [],
+  annotationAutoShapes = [],
   onShapesChange,
   onMove,
   annotationMode = false,
+  annotateVariant = null,
   onAnnotateStart,
+  onAnnotateMove,
   onAnnotateEnd,
 }: Props) {
   const cgRef = useRef<HTMLDivElement | null>(null)
   const apiRef = useRef<Api | null>(null)
   const annotDragStartRef = useRef<Key | null>(null)
   const annotPointerIdRef = useRef<number | null>(null)
+  const annotateVariantRef = useRef<AnnotateVariant | null>(annotateVariant)
+  const onAnnotateMoveRef = useRef(onAnnotateMove)
+
+  const fenRef = useRef(fen)
+  const destsRef = useRef(dests)
+  const turnColorRef = useRef(turnColor)
+  const onMoveRef = useRef(onMove)
+  const onShapesChangeRef = useRef(onShapesChange)
+  useLayoutEffect(() => {
+    fenRef.current = fen
+    destsRef.current = dests
+    turnColorRef.current = turnColor
+    onMoveRef.current = onMove
+    onShapesChangeRef.current = onShapesChange
+  }, [fen, dests, turnColor, onMove, onShapesChange])
+
+  useLayoutEffect(() => {
+    annotateVariantRef.current = annotateVariant
+  }, [annotateVariant])
+
+  useLayoutEffect(() => {
+    onAnnotateMoveRef.current = onAnnotateMove
+  }, [onAnnotateMove])
 
   const eventToSquare = (e: { clientX: number; clientY: number }, el: HTMLDivElement): Key | null => {
     const rect = el.getBoundingClientRect()
@@ -76,13 +108,11 @@ export function Board({
     if (!drawableEnabled || !drawableVisible) return
 
     const onContextMenu = (e: Event) => {
-      // Must be native + capture to reliably beat Chrome's context menu on Windows.
       e.preventDefault()
       e.stopPropagation()
     }
 
     const onPointerDown = (e: PointerEvent) => {
-      // Ensure right-click drag (Chessground drawable) isn't hijacked by the browser.
       if (e.button === 2) {
         e.preventDefault()
         e.stopPropagation()
@@ -98,8 +128,8 @@ export function Board({
   }, [drawableEnabled, drawableVisible])
 
   useEffect(() => {
-    if (!cgRef.current) return
     const el = cgRef.current
+    if (!el) return
 
     const drawableCfg: {
       enabled?: boolean
@@ -107,6 +137,7 @@ export function Board({
       defaultSnapToValidMove?: boolean
       eraseOnClick?: boolean
       shapes?: DrawShape[]
+      autoShapes?: DrawShape[]
       onChange?: (s: DrawShape[]) => void
     } = {
       enabled: drawableEnabled,
@@ -114,54 +145,45 @@ export function Board({
       defaultSnapToValidMove: false,
       eraseOnClick: true,
       shapes,
-      onChange: (s) => onShapesChange?.(s),
+      autoShapes: [],
+      onChange: (s) => onShapesChangeRef.current?.(s),
     }
 
     const api = Chessground(el, {
       orientation,
       coordinates: true,
-      turnColor,
+      turnColor: turnColorRef.current,
       movable: {
         free: false,
-        color: turnColor,
-        dests,
+        color: turnColorRef.current,
+        dests: destsRef.current,
         showDests,
         events: {
           after: async (from, to) => {
             const fromKey = from as Key
             const toKey = to as Key
-            // Revert immediately; parent state is the source of truth.
-            api.set({ fen })
-            await onMove?.(fromKey, toKey)
+            try {
+              await onMoveRef.current?.(fromKey, toKey)
+            } catch {
+              api.set({ fen: fenRef.current })
+            }
           },
         },
       },
       lastMove: lastMove ?? undefined,
       selected: selectedSquare ?? undefined,
       drawable: drawableCfg,
-      fen,
+      fen: fenRef.current,
     })
 
     apiRef.current = api
     return () => {
       apiRef.current = null
-      // chessground doesn't expose a hard destroy in all builds; clearing DOM is enough.
       el.innerHTML = ''
     }
-  }, [
-    dests,
-    drawableEnabled,
-    drawableVisible,
-    fen,
-    lastMove,
-    onMove,
-    onShapesChange,
-    orientation,
-    selectedSquare,
-    shapes,
-    showDests,
-    turnColor,
-  ])
+    // Intentionally omit lastMove / selectedSquare / shapes: they are applied in the update effect below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- avoid destroying the instance on every draw/highlight
+  }, [orientation, drawableEnabled, drawableVisible, showDests])
 
   useEffect(() => {
     apiRef.current?.set({
@@ -170,9 +192,20 @@ export function Board({
       selected: selectedSquare ?? undefined,
       turnColor,
       movable: { color: turnColor, dests, showDests },
-      drawable: { enabled: drawableEnabled, visible: drawableVisible, shapes },
+      drawable: { enabled: drawableEnabled, visible: drawableVisible, shapes, autoShapes: annotationAutoShapes },
     })
-  }, [dests, drawableEnabled, drawableVisible, fen, lastMove, selectedSquare, shapes, showDests, turnColor])
+  }, [
+    annotationAutoShapes,
+    dests,
+    drawableEnabled,
+    drawableVisible,
+    fen,
+    lastMove,
+    selectedSquare,
+    shapes,
+    showDests,
+    turnColor,
+  ])
 
   return (
     <div className="aspect-square w-full">
@@ -195,6 +228,13 @@ export function Board({
             annotDragStartRef.current = sq
             annotPointerIdRef.current = e.pointerId
             onAnnotateStart?.(sq)
+            if (annotateVariantRef.current === 'arrow') {
+              try {
+                el.setPointerCapture(e.pointerId)
+              } catch {
+                /* ignore */
+              }
+            }
             return
           }
           if (!drawableEnabled || !drawableVisible) return
@@ -203,6 +243,15 @@ export function Board({
             e.stopPropagation()
           }
         }}
+        onPointerMove={(e) => {
+          if (!annotationMode) return
+          if (annotPointerIdRef.current !== e.pointerId) return
+          if (annotateVariantRef.current !== 'arrow') return
+          const el = cgRef.current
+          if (!el) return
+          const sq = eventToSquare(e, el)
+          onAnnotateMoveRef.current?.(sq)
+        }}
         onPointerUp={(e) => {
           if (!annotationMode) return
           if (e.button !== 0) return
@@ -210,21 +259,35 @@ export function Board({
 
           const el = cgRef.current
           if (!el) return
-          const sq = eventToSquare(e, el)
-          if (!sq) return
           e.preventDefault()
           e.stopPropagation()
-          onAnnotateEnd?.(sq)
+          onAnnotateMoveRef.current?.(null)
+          const sq = eventToSquare(e, el)
+          try {
+            el.releasePointerCapture(e.pointerId)
+          } catch {
+            /* not captured */
+          }
           annotDragStartRef.current = null
           annotPointerIdRef.current = null
+          onAnnotateEnd?.(sq ?? null)
         }}
         onPointerCancel={(e) => {
           if (annotPointerIdRef.current !== e.pointerId) return
+          onAnnotateMoveRef.current?.(null)
+          const el = cgRef.current
+          if (el) {
+            try {
+              el.releasePointerCapture(e.pointerId)
+            } catch {
+              /* ignore */
+            }
+          }
           annotDragStartRef.current = null
           annotPointerIdRef.current = null
+          onAnnotateEnd?.(null)
         }}
       />
     </div>
   )
 }
-

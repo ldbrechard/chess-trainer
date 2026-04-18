@@ -25,3 +25,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Stockfish WASM (copied by postinstall; large binaries)
+public/stockfish/stockfish.js
+public/stockfish/stockfish.wasm

@@ -1,24 +1,34 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ArrowUpRight, Brain, Circle, Download, Pencil, Share2, Trash2 } from 'lucide-react'
 import { Chess } from 'chess.js'
 import type { Key } from 'chessground/types'
 import type { DrawShape } from 'chessground/draw'
 
 import { Board } from '../../components/Board'
+import { EvalBar } from '../../components/EvalBar'
 import { computeDests } from '../../chess/computeDests'
-import { buildMoveForest, pathToIdSet } from '../../chess/moveTree'
+import { buildMoveForest, pathToIdSet, pickMainLineChild } from '../../chess/moveTree'
 import type { Move, Repertoire, Side } from '../../db/schema'
 import {
   addMove,
   createRepertoire,
   deleteMoveSubtree,
+  deleteRepertoire,
   getRepertoire,
   listChildrenMoves,
   listAllMoves,
   listRepertoires,
+  promoteMoveToMainLine,
   updateMove,
+  updateRepertoireTitle,
 } from '../../db/repertoireRepo'
-import { getSupabaseClient } from '../../lib/supabaseClient'
-import { MoveTreeView } from './MoveTreeView'
+import { insertTrainRun, touchTrainActivityDay } from '../../db/trainStatsRepo'
+import { exportRepertoireToPgn } from '../../lib/pgnImportExport'
+import type { EngineEval } from '../../lib/stockfishClient'
+import { formatEval, StockfishBrowserEngine } from '../../lib/stockfishClient'
+import { ImportRepertoireModal } from '../repertoire/ImportRepertoireModal'
+import { ShareRepertoireModal } from '../repertoire/ShareRepertoireModal'
+import { MoveTreeView, formatMoveWithNag, moveNumberPrefix } from './MoveTreeView'
 import { OpeningExplorer } from './OpeningExplorer'
 
 type Toast = { type: 'info' | 'error'; message: string } | null
@@ -45,12 +55,15 @@ type Modal =
       failedPositions: Array<string | null>
     }
   | { kind: 'confirmDeleteMove'; move: Move }
+  | { kind: 'confirmDeleteRepertoire'; repertoire: Repertoire }
   | null
 
 type View = 'home' | 'session'
 type RepertoireCounts = Record<string, number>
 type AnnotationTool = 'none' | 'arrow' | 'circle'
 type AnnotationBrush = NonNullable<DrawShape['brush']>
+
+const ANNOTATION_BRUSH_CYCLE = ['green', 'red', 'blue'] as const satisfies readonly AnnotationBrush[]
 
 function sideToTurn(side: Side): 'w' | 'b' {
   return side === 'white' ? 'w' : 'b'
@@ -62,8 +75,33 @@ function sleep(ms: number) {
   })
 }
 
+/** Chessground must revert the drag if the move is not applied (see Board `after`). */
+function rejectBoardMove(): never {
+  const e = new Error('BOARD_MOVE_REJECTED')
+  e.name = 'BoardMoveRejected'
+  throw e
+}
+
+function isBoardMoveRejected(e: unknown): boolean {
+  return e instanceof Error && e.name === 'BoardMoveRejected'
+}
+
+/** Coups attendus pour la couleur répertoire à ce nœud (toutes les réponses ou ligne principale seule). */
+function expectedTrainReplies(children: Move[], mainLineOnly: boolean): Move[] {
+  if (children.length === 0) return []
+  if (mainLineOnly) {
+    const main = pickMainLineChild(children)
+    return main ? [main] : []
+  }
+  return children
+}
+
 export function BuildMode() {
   const [view, setView] = useState<View>('home')
+  const [importOpen, setImportOpen] = useState(false)
+  const [shareTarget, setShareTarget] = useState<{ id: string; title: string } | null>(null)
+  const [renameTarget, setRenameTarget] = useState<Repertoire | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
   const [repertoires, setRepertoires] = useState<Repertoire[]>([])
   const [repertoireCounts, setRepertoireCounts] = useState<RepertoireCounts>({})
   const [activeRepertoireId, setActiveRepertoireId] = useState<string | null>(null)
@@ -87,11 +125,27 @@ export function BuildMode() {
   const [annotationTool, setAnnotationTool] = useState<AnnotationTool>('none')
   const [annotationBrush, setAnnotationBrush] = useState<AnnotationBrush>('green')
   const [pendingArrowFrom, setPendingArrowFrom] = useState<Key | null>(null)
+  const [pendingArrowTo, setPendingArrowTo] = useState<Key | null>(null)
+  const arrowDragFromRef = useRef<Key | null>(null)
   const [openingExplorerCollapsed, setOpeningExplorerCollapsed] = useState(false)
   const exploredByParentRef = useRef<Map<string | null, Set<string>>>(new Map())
+  /** True while a user drag is being applied — avoids setBusy() + await flushing a Board update with stale FEN. */
+  const boardInteractionInFlightRef = useRef(false)
+  const [engineBuildOn, setEngineBuildOn] = useState(false)
+  const [positionEval, setPositionEval] = useState<EngineEval | null>(null)
+  const [positionEvalBusy, setPositionEvalBusy] = useState(false)
+  const stockfishRef = useRef<StockfishBrowserEngine | null>(null)
+
+  const stockfishEvaluateFen = useCallback((fen: string) => {
+    const eng = stockfishRef.current
+    if (!eng) return Promise.reject(new Error('Stockfish inactif'))
+    return eng.analyzeFen(fen, { depth: 10, movetimeMs: 300 })
+  }, [])
   const [modal, setModal] = useState<Modal>(null)
 
   const [trainRunActive, setTrainRunActive] = useState(false)
+  const [trainRunSuspended, setTrainRunSuspended] = useState(false)
+  const suspendedResumeNodeIdRef = useRef<string | null>(null)
   const [trainRunKind, setTrainRunKind] = useState<TrainRunKind>('full')
   const [trainScopeRootId, setTrainScopeRootId] = useState<string | null>(null)
   const passedPositionsRef = useRef<Set<string | null>>(new Set())
@@ -101,13 +155,18 @@ export function BuildMode() {
   const [trainPassed, setTrainPassed] = useState(0)
   const [trainFailed, setTrainFailed] = useState(0)
   const [trainCombo, setTrainCombo] = useState(0)
-  const [trainDepthBase, setTrainDepthBase] = useState(0)
   const [trainMissPulse, setTrainMissPulse] = useState(false)
   const [hintStep, setHintStep] = useState<0 | 1 | 2>(0)
   const [replayingSequence, setReplayingSequence] = useState(false)
-  const lastTrainQuestionKeyRef = useRef<string | null | 'none'>('none')
   const [randomCountDraft, setRandomCountDraft] = useState(10)
   const [randomScopeSelected, setRandomScopeSelected] = useState(false)
+  const [trainMainLineOnly, setTrainMainLineOnly] = useState(true)
+  const [trainFoundAnswerIds, setTrainFoundAnswerIds] = useState<string[]>([])
+  const [trainGreyAutoShapes, setTrainGreyAutoShapes] = useState<DrawShape[]>([])
+
+  const trainMovesPlayedRef = useRef(0)
+  const trainSessionNonceRef = useRef(0)
+  const trainStatsInsertedForSessionRef = useRef<number | null>(null)
 
   const currentFen = useMemo(() => {
     if (path.length === 0) return new Chess().fen()
@@ -186,22 +245,34 @@ export function BuildMode() {
   const effectiveTrainPositions = trainRunPositions ?? trainPositions
   const trainTotal = effectiveTrainPositions.length
   const trainRemaining = Math.max(0, trainTotal - trainPassed)
+  const expectedTrainRepliesList = useMemo((): Move[] => {
+    if (mode !== 'train' || !isUsersTurn) return []
+    return expectedTrainReplies(children, trainMainLineOnly)
+  }, [children, isUsersTurn, mode, trainMainLineOnly])
+
+  const trainRepliesRemaining = useMemo(() => {
+    if (expectedTrainRepliesList.length === 0) return 0
+    const found = new Set(trainFoundAnswerIds)
+    return expectedTrainRepliesList.filter((m) => !found.has(m.id)).length
+  }, [expectedTrainRepliesList, trainFoundAnswerIds])
+
   const hintMoveKeys = useMemo(() => {
     if (mode !== 'train') return null
     if (!isUsersTurn) return null
-    const first = children[0]
-    if (!first) return null
+    const found = new Set(trainFoundAnswerIds)
+    const target = expectedTrainRepliesList.find((m) => !found.has(m.id))
+    if (!target) return null
 
     const c = new Chess()
     try {
       c.load(currentFen)
-      const move = c.move(first.notation)
+      const move = c.move(target.notation)
       if (!move) return null
       return { from: move.from as Key, to: move.to as Key }
     } catch {
       return null
     }
-  }, [children, currentFen, isUsersTurn, mode])
+  }, [currentFen, expectedTrainRepliesList, isUsersTurn, mode, trainFoundAnswerIds])
   const hintSelectedSquare =
     hintStep === 1 ? hintMoveKeys?.from ?? null : hintStep === 2 ? hintMoveKeys?.to ?? null : null
   const boardOrientation: 'white' | 'black' = flipBoard
@@ -213,6 +284,14 @@ export function BuildMode() {
       : 'white'
   const boardDests = showDests ? dests : new Map<Key, Key[]>()
   const currentShapes = shapesByFen[currentFen] ?? []
+
+  const annotationPreviewAutoShapes = useMemo((): DrawShape[] => {
+    if (annotationTool !== 'arrow') return []
+    if (!pendingArrowFrom || !pendingArrowTo || pendingArrowFrom === pendingArrowTo) return []
+    const brush = annotationBrush as DrawShape['brush']
+    return [{ orig: pendingArrowFrom, dest: pendingArrowTo, brush }]
+  }, [annotationBrush, annotationTool, pendingArrowFrom, pendingArrowTo])
+
   const isAnnotating = mode === 'build' && annotationTool !== 'none'
   const whiteRepertoires = useMemo(() => repertoires.filter((r) => r.side === 'white'), [repertoires])
   const blackRepertoires = useMemo(() => repertoires.filter((r) => r.side === 'black'), [repertoires])
@@ -252,6 +331,7 @@ export function BuildMode() {
       exploredByParentRef.current.clear()
       setModal(null)
       setTrainRunActive(false)
+      setTrainRunSuspended(false)
       setTrainRunKind('full')
       setTrainScopeRootId(null)
       passedPositionsRef.current = new Set()
@@ -283,6 +363,7 @@ export function BuildMode() {
       exploredByParentRef.current.clear()
       setModal(null)
       setTrainRunActive(false)
+      setTrainRunSuspended(false)
       setTrainRunKind('full')
       setTrainScopeRootId(null)
       passedPositionsRef.current = new Set()
@@ -293,7 +374,7 @@ export function BuildMode() {
       setTrainFailed(0)
       setHintStep(0)
       setSettingsOpen(false)
-      setFlipBoard((rep?.side ?? 'white') === 'black')
+      setFlipBoard(false)
       setShowDests(true)
       setShowBoardAnnotations(false)
     })()
@@ -301,33 +382,72 @@ export function BuildMode() {
 
   useEffect(() => {
     // Hide annotations by default in Train; keep whatever user had in Build.
-    if (mode === 'train') setShowBoardAnnotations(false)
+    if (mode === 'train') {
+      setShowBoardAnnotations(false)
+      setToast(null)
+    }
   }, [mode])
 
   useEffect(() => {
-    // Depth base = path length at the start of the *current question position* (user to move).
-    if (mode !== 'train') {
-      lastTrainQuestionKeyRef.current = 'none'
-      setTrainDepthBase(0)
+    if (!engineBuildOn || mode !== 'build') {
+      stockfishRef.current?.dispose()
+      stockfishRef.current = null
+      setPositionEval(null)
+      setPositionEvalBusy(false)
       return
     }
-    if (!trainRunActive) return
-    if (!isUsersTurn) return
-
-    const key = currentNodeId ?? null
-    if (lastTrainQuestionKeyRef.current !== key) {
-      lastTrainQuestionKeyRef.current = key
-      setTrainDepthBase(path.length)
+    stockfishRef.current = new StockfishBrowserEngine()
+    return () => {
+      stockfishRef.current?.dispose()
+      stockfishRef.current = null
     }
-  }, [currentNodeId, isUsersTurn, mode, path.length, trainRunActive])
+  }, [engineBuildOn, mode])
+
+  useEffect(() => {
+    if (!engineBuildOn || mode !== 'build') {
+      setPositionEval(null)
+      setPositionEvalBusy(false)
+      return
+    }
+    const eng = stockfishRef.current
+    if (!eng) return
+    let cancelled = false
+    setPositionEvalBusy(true)
+    void eng
+      .analyzeFen(currentFen, { depth: 12, movetimeMs: 450 })
+      .then((e) => {
+        if (!cancelled) setPositionEval(e)
+      })
+      .catch(() => {
+        if (!cancelled) setPositionEval(null)
+      })
+      .finally(() => {
+        if (!cancelled) setPositionEvalBusy(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [currentFen, engineBuildOn, mode])
+
+  useEffect(() => {
+    if (renameTarget) setRenameDraft(renameTarget.title)
+  }, [renameTarget])
 
   useEffect(() => {
     setHintStep(0)
   }, [children.length, currentFen, mode])
 
   useEffect(() => {
+    if (mode !== 'train') return
+    setTrainFoundAnswerIds([])
+    setTrainGreyAutoShapes([])
+  }, [currentNodeId, isUsersTurn, mode])
+
+  useEffect(() => {
     // Don't keep half-finished arrows when position changes.
     setPendingArrowFrom(null)
+    setPendingArrowTo(null)
+    arrowDragFromRef.current = null
   }, [annotationTool, currentFen])
 
   const toggleShape = useCallback((shape: DrawShape) => {
@@ -347,17 +467,40 @@ export function BuildMode() {
 
       // Ensure shapes are visible while using tools.
       if (!showBoardAnnotations) setShowBoardAnnotations(true)
-      if (annotationTool === 'arrow') setPendingArrowFrom(sq)
+      if (annotationTool === 'arrow') {
+        setPendingArrowTo(null)
+        arrowDragFromRef.current = sq
+        setPendingArrowFrom(sq)
+      }
     },
     [annotationTool, mode, showBoardAnnotations],
   )
 
+  const onAnnotateMove = useCallback(
+    (sq: Key | null) => {
+      if (mode !== 'build') return
+      if (annotationTool !== 'arrow') return
+      setPendingArrowTo(sq)
+    },
+    [annotationTool, mode],
+  )
+
   const onAnnotateEnd = useCallback(
-    (sq: Key) => {
+    (sq: Key | null) => {
       if (mode !== 'build') return
       if (annotationTool === 'none') return
 
       if (!showBoardAnnotations) setShowBoardAnnotations(true)
+
+      setPendingArrowTo(null)
+
+      if (sq === null) {
+        if (annotationTool === 'arrow') {
+          arrowDragFromRef.current = null
+          setPendingArrowFrom(null)
+        }
+        return
+      }
 
       const brush = annotationBrush as DrawShape['brush']
       if (annotationTool === 'circle') {
@@ -365,7 +508,8 @@ export function BuildMode() {
         return
       }
 
-      const from = pendingArrowFrom
+      const from = arrowDragFromRef.current ?? pendingArrowFrom
+      arrowDragFromRef.current = null
       setPendingArrowFrom(null)
       if (!from) return
       if (from === sq) return
@@ -403,6 +547,7 @@ export function BuildMode() {
 
   const resetTrainRun = useCallback(() => {
     exploredByParentRef.current.clear()
+    setTrainRunSuspended(false)
     setTrainRunKind('full')
     setTrainScopeRootId(null)
     passedPositionsRef.current = new Set()
@@ -411,8 +556,9 @@ export function BuildMode() {
     setTrainFailed(0)
     setTrainRunIndex(0)
     setTrainCombo(0)
-    setTrainDepthBase(0)
-    lastTrainQuestionKeyRef.current = 'none'
+    trainMovesPlayedRef.current = 0
+    setTrainFoundAnswerIds([])
+    setTrainGreyAutoShapes([])
   }, [])
 
   const replayToPositionId = useCallback(
@@ -456,6 +602,23 @@ export function BuildMode() {
     [activeRepertoireId, goToRoot, movesById, refreshChildren],
   )
 
+  const suspendTrainRun = useCallback(() => {
+    if (!trainRunActive) return
+    suspendedResumeNodeIdRef.current = currentNodeId
+    setTrainRunSuspended(true)
+    setTrainRunActive(false)
+    setMode('build')
+  }, [trainRunActive, currentNodeId])
+
+  const resumeTrainRun = useCallback(async () => {
+    if (!trainRunSuspended) return
+    const pos = suspendedResumeNodeIdRef.current
+    setTrainRunSuspended(false)
+    setTrainRunActive(true)
+    setMode('train')
+    await replayToPositionId(pos ?? null)
+  }, [trainRunSuspended, replayToPositionId])
+
   const startTrainRun = useCallback(
     async (options?: {
       kind?: TrainRunKind
@@ -471,6 +634,7 @@ export function BuildMode() {
       setTrainRunPositions(positions ?? null)
       setTrainRunActive(true)
       setMode('train')
+      trainSessionNonceRef.current += 1
 
       if (positions && positions.length > 0) {
         setTrainRunIndex(0)
@@ -547,14 +711,12 @@ export function BuildMode() {
         if (remaining.length > 0) {
           // Jump back to that parent position, continue from the next variation.
           await replayToPositionId(parentId)
-          setToast({ type: 'info', message: 'Ligne terminée. Nouvelle variante…' })
           return
         }
       }
 
       // Fully explored: reset and restart from root (fresh tour).
       exploredByParentRef.current.clear()
-      setToast({ type: 'info', message: 'Répertoire exploré. On recommence un nouveau tour.' })
       await goToRoot()
     } finally {
       setBusy(false)
@@ -602,7 +764,7 @@ export function BuildMode() {
     const handler = (e: KeyboardEvent) => {
       if (mode !== 'build') return
       if (!activeRepertoireId) return
-      if (busy) return
+      if (busy || boardInteractionInFlightRef.current) return
 
       const target = e.target as HTMLElement | null
       const tag = target?.tagName?.toLowerCase()
@@ -639,10 +801,10 @@ export function BuildMode() {
   }, [activeRepertoireId, busy, children, goBack, mode, selectVariant, selectedChildIndex])
 
   const applyBuildMove = async (from: Key, to: Key, promotion?: string) => {
-    if (!activeRepertoireId || !activeRepertoire) return
-    if (busy) return
+    if (!activeRepertoireId || !activeRepertoire) rejectBoardMove()
+    if (busy || boardInteractionInFlightRef.current) rejectBoardMove()
+    boardInteractionInFlightRef.current = true
 
-    setBusy(true)
     setToast(null)
     setRevealed(null)
     setHintStep(0)
@@ -651,7 +813,7 @@ export function BuildMode() {
       c.load(currentFen)
 
       const move = c.move({ from, to, promotion: promotion ?? 'q' })
-      if (!move) return
+      if (!move) rejectBoardMove()
 
       const notation = move.san
       const nextFen = c.fen()
@@ -662,22 +824,13 @@ export function BuildMode() {
         parentId,
       })
 
-      const turnBefore = chess.turn()
-      const isOurTurn = turnBefore === sideToTurn(activeRepertoire.side)
-
       const existingSame = existingChildren.find((m) => m.notation === notation)
       if (existingSame) {
         await selectVariant(existingSame)
         return
       }
 
-      if (isOurTurn && existingChildren.length >= 1) {
-        setToast({
-          type: 'info',
-          message: 'Une seule réponse est autorisée pour ta couleur à cette position.',
-        })
-        return
-      }
+      const isFirstChildAtParent = existingChildren.length === 0
 
       const id = await addMove({
         repertoireId: activeRepertoireId,
@@ -686,6 +839,7 @@ export function BuildMode() {
         notation,
         comment: '',
         eval: undefined,
+        isMainLine: isFirstChildAtParent ? true : undefined,
       })
 
       const newMove: Move = {
@@ -695,16 +849,20 @@ export function BuildMode() {
         fen: nextFen,
         notation,
         comment: '',
+        isMainLine: isFirstChildAtParent ? true : undefined,
       }
 
       await selectVariant(newMove)
+      setBusy(true)
       await refreshChildren(activeRepertoireId, id)
       await refreshAllMoves(activeRepertoireId)
       await refreshRepertoireOverview()
-    } catch {
+    } catch (e) {
+      if (isBoardMoveRejected(e)) throw e
       setToast({ type: 'error', message: 'Erreur lors de la sauvegarde du coup.' })
-      // Do not crash the UI; surface via toast.
+      rejectBoardMove()
     } finally {
+      boardInteractionInFlightRef.current = false
       setBusy(false)
     }
   }
@@ -726,27 +884,30 @@ export function BuildMode() {
   )
 
   const onBoardMoveTrain = async (from: Key, to: Key) => {
-    if (!activeRepertoireId || !activeRepertoire) return
-    if (busy) return
-    if (!isUsersTurn) return
+    if (!activeRepertoireId || !activeRepertoire) rejectBoardMove()
+    if (busy || boardInteractionInFlightRef.current) rejectBoardMove()
+    if (!isUsersTurn) rejectBoardMove()
+    boardInteractionInFlightRef.current = true
 
-    setBusy(true)
-    setToast(null)
     setRevealed(null)
     try {
       const c = new Chess()
       c.load(currentFen)
 
       const move = c.move({ from, to, promotion: 'q' })
-      if (!move) return
+      if (!move) rejectBoardMove()
+
+      trainMovesPlayedRef.current += 1
+      if (trainRunActive) void touchTrainActivityDay()
 
       const notation = move.san
       const parentId = currentNodeId
-      const expected = await listChildrenMoves({ repertoireId: activeRepertoireId, parentId })
+      const expected = expectedTrainReplies(children, trainMainLineOnly)
 
-      const match = expected.find((m) => m.notation === notation)
+      const match = expected.find((m) => m.notation === notation && !trainFoundAnswerIds.includes(m.id))
       if (!match) {
-        setToast({ type: 'info', message: 'Incorrect.' })
+        setTrainFoundAnswerIds([])
+        setTrainGreyAutoShapes([])
         setTrainMissPulse(true)
         window.setTimeout(() => setTrainMissPulse(false), 450)
         setTrainCombo(0)
@@ -764,14 +925,33 @@ export function BuildMode() {
           const nextPos = trainRunPositions[nextIdx]
           if (nextPos !== undefined) {
             await replayToPositionId(nextPos)
+            return
           }
         }
-        return
+        rejectBoardMove()
       }
 
-      await selectVariant(match)
-      markExplored(parentId ?? null, match.id)
-      setTrainCombo((c) => c + 1)
+      const nextFound = [...trainFoundAnswerIds, match.id]
+      const allFound = expected.length > 0 && expected.every((m) => nextFound.includes(m.id))
+
+      const greyBrush = 'paleGrey' as DrawShape['brush']
+      setTrainGreyAutoShapes((prev) => [
+        ...prev,
+        { orig: move.from as Key, dest: move.to as Key, brush: greyBrush },
+      ])
+      setTrainFoundAnswerIds(nextFound)
+
+      if (!allFound) {
+        rejectBoardMove()
+      }
+
+      const advance = pickMainLineChild(children)
+      if (!advance) rejectBoardMove()
+
+      await selectVariant(advance)
+      setBusy(true)
+      markExplored(parentId ?? null, advance.id)
+      setTrainCombo((x) => x + 1)
       if (trainRunActive) {
         const posKey = parentId ?? null
         if (!passedPositionsRef.current.has(posKey)) {
@@ -788,9 +968,11 @@ export function BuildMode() {
           await replayToPositionId(nextPos)
         }
       }
-    } catch {
-      setToast({ type: 'error', message: 'Erreur en mode Train.' })
+    } catch (e) {
+      if (isBoardMoveRejected(e)) throw e
+      rejectBoardMove()
     } finally {
+      boardInteractionInFlightRef.current = false
       setBusy(false)
     }
   }
@@ -799,7 +981,7 @@ export function BuildMode() {
     // Auto-play opponent moves in Train mode.
     if (mode !== 'train') return
     if (!activeRepertoireId || !activeRepertoire) return
-    if (busy) return
+    if (busy || boardInteractionInFlightRef.current) return
     if (isUsersTurn) return
     if (trainRunKind === 'failed') return
 
@@ -843,7 +1025,7 @@ export function BuildMode() {
     // When a line is completed in Train, continue with another line.
     if (mode !== 'train') return
     if (!activeRepertoireId || !activeRepertoire) return
-    if (busy) return
+    if (busy || boardInteractionInFlightRef.current) return
     if (trainRunKind === 'failed') return
 
     // Leaf reached: no more moves from this node.
@@ -871,9 +1053,33 @@ export function BuildMode() {
     if (!trainRunActive) return
     if (trainTotal === 0) return
     if (trainPassed !== trainTotal) return
+    if (!activeRepertoireId) return
+
+    const sid = trainSessionNonceRef.current
+    if (trainStatsInsertedForSessionRef.current === sid) return
+    trainStatsInsertedForSessionRef.current = sid
 
     const passed = trainPassed
     const failed = trainFailed
+    const repId = activeRepertoireId
+    const kind = trainRunKind
+    const scopeRoot = trainScopeRootId
+    const total = trainTotal
+    const movesPlayed = trainMovesPlayedRef.current
+
+    void insertTrainRun({
+      repertoireId: repId,
+      kind,
+      scopeRootMoveId: scopeRoot,
+      totalPositions: total,
+      passed,
+      failed,
+      movesPlayed,
+    }).catch(() => {
+      /* ignore persistence errors */
+    })
+
+    setTrainRunSuspended(false)
     setTrainRunActive(false)
     setMode('build')
     setHintStep(0)
@@ -884,7 +1090,15 @@ export function BuildMode() {
       failed,
       failedPositions: [...failedPositionsRef.current],
     })
-  }, [trainFailed, trainPassed, trainRunActive, trainTotal])
+  }, [
+    activeRepertoireId,
+    trainFailed,
+    trainPassed,
+    trainRunActive,
+    trainRunKind,
+    trainScopeRootId,
+    trainTotal,
+  ])
 
   const handleCreate = async (title: string, side: Side) => {
     setBusy(true)
@@ -901,6 +1115,21 @@ export function BuildMode() {
       setBusy(false)
     }
   }
+
+  const handleExportPgn = useCallback(async (repertoireId: string) => {
+    const rep = await getRepertoire(repertoireId)
+    if (!rep) return
+    const moves = await listAllMoves(repertoireId)
+    const pgn = exportRepertoireToPgn(rep, moves)
+    const safe = rep.title.replace(/[^a-zA-Z0-9\-_ ]+/g, '_').trim().slice(0, 80) || 'repertoire'
+    const blob = new Blob([pgn], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${safe}.pgn`
+    a.click()
+    URL.revokeObjectURL(url)
+  }, [])
 
   const onDeleteMove = useCallback(
     async (move: Move) => {
@@ -1007,28 +1236,13 @@ export function BuildMode() {
   ])
 
   return (
-    <div className="flex flex-1 flex-col gap-6 px-4 py-8">
-      {view === 'session' ? (
-        <button
-          type="button"
-          className="fixed right-4 top-4 z-40 counter"
-          aria-label="Paramètres de l'échiquier"
-          onClick={() => setSettingsOpen(true)}
-          title="Paramètres"
-        >
-          ⚙
-        </button>
-      ) : null}
+    <div className="flex flex-1 flex-col gap-6 px-4 py-8 pr-16 sm:pr-20">
       {view === 'home' ? (
         <div className="mx-auto w-full max-w-[920px] text-left">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <h1>Répertoires</h1>
-            <button
-              type="button"
-              className="counter text-sm"
-              onClick={() => void getSupabaseClient().auth.signOut()}
-            >
-              Déconnexion
+            <button type="button" className="counter text-sm" onClick={() => setImportOpen(true)}>
+              Importer un répertoire
             </button>
           </div>
           <p>Sélectionne un répertoire pour ouvrir Build/Train.</p>
@@ -1045,6 +1259,10 @@ export function BuildMode() {
                     setMode('build')
                     setView('session')
                   }}
+                  onExportPgn={handleExportPgn}
+                  onShare={(id, title) => setShareTarget({ id, title })}
+                  onRename={(r) => setRenameTarget(r)}
+                  onDelete={(r) => setModal({ kind: 'confirmDeleteRepertoire', repertoire: r })}
                 />
                 <HomeSection
                   title="Noirs"
@@ -1055,6 +1273,10 @@ export function BuildMode() {
                     setMode('build')
                     setView('session')
                   }}
+                  onExportPgn={handleExportPgn}
+                  onShare={(id, title) => setShareTarget({ id, title })}
+                  onRename={(r) => setRenameTarget(r)}
+                  onDelete={(r) => setModal({ kind: 'confirmDeleteRepertoire', repertoire: r })}
                 />
               </div>
             </div>
@@ -1073,71 +1295,125 @@ export function BuildMode() {
         </div>
       ) : (
         mode === 'train' ? (
-          <div className="mx-auto w-full max-w-[720px]">
-            <div className="mb-3 flex items-center justify-between gap-2">
-              <div className="min-w-0 text-left">
-                <div className="truncate text-sm font-medium text-[var(--text-h)]">
-                  {activeRepertoire?.title ?? '—'}
+          <div className="mx-auto w-full max-w-[420px]">
+            <div className="rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-2.5 shadow-[var(--shadow)] sm:p-3">
+              <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <span className="truncate text-xs font-medium text-[var(--text-h)]">
+                    {activeRepertoire?.title ?? '—'}
+                  </span>
+                  {activeRepertoire?.side ? (
+                    <span
+                      className={[
+                        'h-2 w-2 shrink-0 rounded-full border',
+                        activeRepertoire.side === 'white'
+                          ? 'border-[var(--border)] bg-white'
+                          : 'border-neutral-700 bg-neutral-900 dark:border-neutral-600 dark:bg-neutral-950',
+                      ].join(' ')}
+                      title={activeRepertoire.side === 'white' ? 'Blancs' : 'Noirs'}
+                      aria-label={activeRepertoire.side === 'white' ? 'Blancs' : 'Noirs'}
+                    />
+                  ) : null}
                 </div>
-                <div className="text-xs opacity-80">{activeRepertoire?.side ?? '—'}</div>
-              </div>
-              <div className="flex gap-2">
-                <button type="button" className="counter" onClick={() => setView('home')}>
-                  Home
-                </button>
-                <button type="button" className="counter" onClick={() => setMode('build')}>
-                  Build
-                </button>
-              </div>
-            </div>
-
-            <div className="rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-4 shadow-[var(--shadow)]">
-              <div className="mx-auto w-full max-w-[420px]">
-                <div className={trainMissPulse ? 'train-miss-shake' : ''}>
-                  <Board
-                    fen={currentFen}
-                    dests={!isUsersTurn ? new Map() : dests}
-                    showDests={showDests}
-                    turnColor={turnColor}
-                    orientation={boardOrientation}
-                    onMove={onBoardMoveTrain}
-                    lastMove={undefined}
-                    selectedSquare={hintSelectedSquare}
-                    drawableEnabled={showBoardAnnotations}
-                    drawableVisible={showBoardAnnotations}
-                    shapes={currentShapes}
-                    onShapesChange={(next) => {
-                      setShapesByFen((prev) => ({ ...prev, [currentFen]: next }))
+                <div className="flex shrink-0 items-center gap-0.5">
+                  <button type="button" className="train-accent-btn" onClick={() => setView('home')}>
+                    Home
+                  </button>
+                  <button
+                    type="button"
+                    className="train-accent-btn"
+                    onClick={() => {
+                      if (trainRunActive) suspendTrainRun()
+                      else setMode('build')
                     }}
-                    annotationMode={false}
-                  />
+                  >
+                    Build
+                  </button>
+                  <button
+                    type="button"
+                    className="train-accent-btn train-accent-btn--icon"
+                    aria-label="Paramètres de l'échiquier"
+                    title="Paramètres"
+                    onClick={() => setSettingsOpen(true)}
+                  >
+                    ⚙
+                  </button>
+                </div>
+              </div>
+              <div className={trainMissPulse ? 'train-miss-shake' : ''}>
+                <Board
+                  fen={currentFen}
+                  dests={!isUsersTurn ? new Map() : dests}
+                  showDests={showDests}
+                  turnColor={turnColor}
+                  orientation={boardOrientation}
+                  onMove={onBoardMoveTrain}
+                  lastMove={undefined}
+                  selectedSquare={hintSelectedSquare}
+                  drawableEnabled={showBoardAnnotations || trainGreyAutoShapes.length > 0}
+                  drawableVisible={showBoardAnnotations || trainGreyAutoShapes.length > 0}
+                  shapes={currentShapes}
+                  annotationAutoShapes={trainGreyAutoShapes}
+                  onShapesChange={(next) => {
+                    setShapesByFen((prev) => ({ ...prev, [currentFen]: next }))
+                  }}
+                  annotationMode={false}
+                />
+              </div>
+
+                <div className="mt-1.5 text-left">
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      className={[
+                        'toggle-switch toggle-switch--sm',
+                        showBoardAnnotations ? 'is-on' : '',
+                      ].join(' ')}
+                      role="switch"
+                      aria-checked={showBoardAnnotations}
+                      aria-label="Afficher les annotations sur l'échiquier"
+                      onClick={() => setShowBoardAnnotations((v) => !v)}
+                    >
+                      <span className="toggle-thumb" />
+                    </button>
+                    <span className="text-[10px] uppercase tracking-wide text-[var(--text-h)] opacity-50">
+                      Annotations
+                    </span>
+                  </div>
+                  {showBoardAnnotations && selectedMove?.comment?.trim() ? (
+                    <div className="mt-1 rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-1 text-[10px] leading-snug text-[var(--text-h)]">
+                      <p className="whitespace-pre-wrap opacity-90">{selectedMove.comment.trim()}</p>
+                    </div>
+                  ) : null}
                 </div>
 
-                <div className="mt-4 flex flex-wrap items-center justify-between gap-2 text-left">
-                  <div className="text-sm">
+                <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-left">
+                  <div className="text-xs">
                     <div className="font-medium text-[var(--text-h)]">Run</div>
                     {!replayingSequence ? (
-                      <div className="font-mono">
+                      <div className="font-mono text-[11px]">
                         {children.length === 0
                           ? 'Fin de ligne'
                           : isUsersTurn
-                            ? 'À toi'
+                            ? expectedTrainRepliesList.length > 1
+                              ? `À toi · ${trainRepliesRemaining} réponse${trainRepliesRemaining > 1 ? 's' : ''} à trouver`
+                              : 'À toi'
                             : 'Réponse…'}
                       </div>
                     ) : null}
                     {trainRunActive ? (
                       <>
-                        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--code-bg)]">
+                        <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-[var(--code-bg)]">
                           <div
                             className="h-full rounded-full bg-[var(--accent)] transition-all duration-300"
                             style={{ width: `${trainTotal === 0 ? 0 : (trainPassed / trainTotal) * 100}%` }}
                           />
                         </div>
-                        <div className="mt-2 flex items-center justify-between gap-2 text-xs opacity-80">
+                        <div className="mt-1 flex items-center justify-between gap-2 text-[10px] opacity-80">
                           <div>
                             Restantes: {trainRemaining} · Passées: {trainPassed} · Failed: {trainFailed}
                           </div>
-                          <div className="font-mono">Profondeur = {Math.max(0, path.length - trainDepthBase)}</div>
+                          <div className="font-mono">Profondeur = {path.length}</div>
                         </div>
                       </>
                     ) : null}
@@ -1145,7 +1421,7 @@ export function BuildMode() {
 
                   {trainCombo >= 3 ? (
                     <div
-                      className="flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--bg)] px-2 py-1 text-xs font-medium text-[var(--text-h)]"
+                      className="flex items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--bg)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--text-h)]"
                       title="Combo"
                     >
                       <span className="select-none">🔥</span>
@@ -1155,11 +1431,13 @@ export function BuildMode() {
 
                   <button
                     type="button"
-                    className="counter"
+                    className="train-accent-btn"
                     disabled={!isUsersTurn || !hintMoveKeys}
                     onClick={() => {
                       if (!isUsersTurn) return
                       if (!hintMoveKeys) return
+                      setTrainFoundAnswerIds([])
+                      setTrainGreyAutoShapes([])
                       if (trainRunActive) {
                         const posKey = currentNodeId ?? null
                         if (!failedPositionsRef.current.has(posKey)) {
@@ -1175,7 +1453,7 @@ export function BuildMode() {
                   </button>
                   <button
                     type="button"
-                    className="counter"
+                    className="train-accent-btn"
                     disabled={busy}
                     onClick={() => {
                       void replayToPositionId(currentNodeId)
@@ -1183,28 +1461,37 @@ export function BuildMode() {
                   >
                     Replay moves
                   </button>
+                  <button
+                    type="button"
+                    className="train-accent-btn"
+                    disabled={busy || replayingSequence}
+                    onClick={() => suspendTrainRun()}
+                  >
+                    Suspendre
+                  </button>
                 </div>
 
                 {trainMissPulse ? (
-                  <div className="mt-3 rounded-md border border-red-400/40 bg-red-500/10 px-3 py-2 text-left text-sm font-medium text-red-600 dark:text-red-300">
+                  <div className="mt-1.5 rounded border border-red-400/40 bg-red-500/10 px-2 py-1 text-left text-[10px] font-medium text-red-600 dark:text-red-300">
                     Coup incorrect.
                   </div>
                 ) : null}
 
-                <div className="mt-3 text-left">
-                  <div className="text-sm font-medium text-[var(--text-h)]">Chemin</div>
-                  <div className="mt-2 flex flex-wrap gap-2">
+                <div className="mt-1.5 text-left">
+                  <div className="text-[11px] font-medium text-[var(--text-h)]">Chemin</div>
+                  <div className="mt-1 flex flex-wrap gap-1">
                     {path.length === 0 ? (
-                      <span className="rounded-md bg-[var(--code-bg)] px-2 py-1 font-mono text-sm text-[var(--text-h)]">
+                      <span className="rounded bg-[var(--code-bg)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--text-h)]">
                         (root)
                       </span>
                     ) : (
-                      path.map((move) => (
+                      path.map((move, depth) => (
                         <span
                           key={move.id}
-                          className="rounded-md bg-[var(--code-bg)] px-2 py-1 font-mono text-sm text-[var(--text-h)]"
+                          className="rounded bg-[var(--code-bg)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--text-h)]"
                         >
-                          {move.notation}
+                          {moveNumberPrefix(depth, depth === 0)}
+                          {formatMoveWithNag(move)}
                         </span>
                       ))
                     )}
@@ -1212,21 +1499,10 @@ export function BuildMode() {
                 </div>
 
                 {hintStep > 0 ? (
-                  <div className="mt-3 text-left text-sm opacity-80">
+                  <div className="mt-1.5 text-left text-[10px] opacity-80">
                     {hintStep === 1 ? 'Hint: pièce à jouer' : 'Hint: case de destination'}
                   </div>
                 ) : null}
-
-                {toast ? (
-                  <div
-                    className="mt-4 rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm"
-                    role="status"
-                  >
-                    <span className="font-medium">{toast.type === 'error' ? 'Erreur' : 'Info'}</span>
-                    <span className="ml-2">{toast.message}</span>
-                  </div>
-                ) : null}
-              </div>
             </div>
           </div>
         ) : (
@@ -1260,6 +1536,23 @@ export function BuildMode() {
                   </button>
                 </div>
               </div>
+
+              {trainRunSuspended ? (
+                <div className="mt-4 rounded-md border border-[var(--border)] bg-[var(--accent-bg)] px-3 py-3 text-left text-sm text-[var(--text-h)]">
+                  <div className="text-xs font-medium opacity-80">Entraînement en pause</div>
+                  <div className="mt-2 text-xs opacity-75">
+                    Passées: {trainPassed} / {trainTotal} · Restantes: {trainRemaining} · Échecs: {trainFailed}
+                  </div>
+                  <button
+                    type="button"
+                    className="counter mt-3 w-full"
+                    disabled={busy || replayingSequence}
+                    onClick={() => void resumeTrainRun()}
+                  >
+                    {"Reprendre l'entraînement"}
+                  </button>
+                </div>
+              ) : null}
 
               <div className="mt-4">
                 <label className="block text-sm font-medium text-[var(--text-h)]" htmlFor="repSelect">
@@ -1342,6 +1635,49 @@ export function BuildMode() {
                     disabled={busy}
                   />
 
+                  <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                    {selectedMove.isMainLine ? (
+                      <span className="text-xs font-medium text-[var(--accent)]">Ligne principale</span>
+                    ) : (
+                      <span className="text-xs opacity-60">Variante</span>
+                    )}
+                    {(() => {
+                      const sibs = allMoves.filter((m) => m.parentId === selectedMove.parentId)
+                      if (sibs.length < 2) return null
+                      if (selectedMove.isMainLine) return null
+                      return (
+                        <button
+                          type="button"
+                          className="counter !px-2 !py-1 text-xs"
+                          disabled={busy}
+                          onClick={() => {
+                            const moveId = selectedMove.id
+                            const parentId = selectedMove.parentId
+                            if (!moveId) return
+                            void (async () => {
+                              setBusy(true)
+                              setToast(null)
+                              try {
+                                await promoteMoveToMainLine(moveId)
+                                if (activeRepertoireId) {
+                                  await refreshAllMoves(activeRepertoireId)
+                                  await refreshChildren(activeRepertoireId, parentId)
+                                  await refreshRepertoireOverview()
+                                }
+                              } catch {
+                                setToast({ type: 'error', message: 'Impossible de définir la ligne principale.' })
+                              } finally {
+                                setBusy(false)
+                              }
+                            })()
+                          }}
+                        >
+                          Définir comme ligne principale
+                        </button>
+                      )
+                    })()}
+                  </div>
+
                   <div className="mt-3 flex justify-end">
                     <button type="button" className="counter" disabled={busy} onClick={() => void saveMoveMeta()}>
                       Save
@@ -1364,73 +1700,117 @@ export function BuildMode() {
             <main className="rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-4 shadow-[var(--shadow)]">
               <div className="mx-auto w-full max-w-[420px]">
                 <div className="mb-3 flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <div className="flex items-center gap-2">
-                      {(
-                        [
-                          { id: 'green', cls: 'bg-green-500' },
-                          { id: 'red', cls: 'bg-red-500' },
-                          { id: 'blue', cls: 'bg-blue-500' },
-                        ] as const
-                      ).map((c) => (
-                        <button
-                          key={c.id}
-                          type="button"
-                          className={[
-                            'h-5 w-5 rounded-full border border-[var(--border)]',
-                            c.cls,
-                            annotationBrush === c.id ? 'ring-2 ring-[var(--accent)] ring-offset-2 ring-offset-[var(--social-bg)]' : '',
-                          ].join(' ')}
-                          onClick={() => setAnnotationBrush(c.id)}
-                          aria-label={`Couleur ${c.id}`}
-                          title={`Couleur ${c.id}`}
-                        />
-                      ))}
-                    </div>
+                  <div className="flex items-center gap-1.5">
                     <button
                       type="button"
                       className={[
-                        'counter !px-2 !py-1',
-                        annotationTool === 'arrow' ? 'bg-[var(--accent)] text-white ring-2 ring-[var(--accent)]' : '',
+                        'h-3.5 w-3.5 flex-shrink-0 rounded-full shadow-sm transition-transform active:scale-90',
+                        annotationBrush === 'red'
+                          ? 'bg-red-600 hover:bg-red-500'
+                          : annotationBrush === 'blue'
+                            ? 'bg-blue-600 hover:bg-blue-500'
+                            : 'bg-emerald-600 hover:bg-emerald-500',
+                      ].join(' ')}
+                      aria-label={`Couleur ${annotationBrush} (clic pour changer)`}
+                      title="Couleur — clic pour faire défiler vert, rouge, bleu"
+                      onClick={() =>
+                        setAnnotationBrush((prev) => {
+                          const i = ANNOTATION_BRUSH_CYCLE.indexOf(
+                            prev as (typeof ANNOTATION_BRUSH_CYCLE)[number],
+                          )
+                          return ANNOTATION_BRUSH_CYCLE[i === -1 ? 0 : (i + 1) % ANNOTATION_BRUSH_CYCLE.length]
+                        })
+                      }
+                    />
+                    <button
+                      type="button"
+                      className={[
+                        'inline-flex h-7 w-7 items-center justify-center rounded-[5px] border-2 text-[var(--text-h)] transition-colors',
+                        annotationTool === 'arrow'
+                          ? 'border-transparent bg-[var(--accent-bg)] text-[var(--accent)] hover:border-[var(--accent-border)]'
+                          : 'border-transparent bg-transparent opacity-60 hover:bg-[var(--accent-bg)] hover:opacity-100 hover:text-[var(--accent)]',
                       ].join(' ')}
                       onClick={() => setAnnotationTool((t) => (t === 'arrow' ? 'none' : 'arrow'))}
                       aria-pressed={annotationTool === 'arrow'}
-                      title="Flèches (drag)"
+                      title="Flèches (glisser)"
                     >
-                      ↗
+                      <ArrowUpRight className="h-3 w-3" strokeWidth={2.25} aria-hidden />
                     </button>
                     <button
                       type="button"
                       className={[
-                        'counter !px-2 !py-1',
-                        annotationTool === 'circle' ? 'bg-[var(--accent)] text-white ring-2 ring-[var(--accent)]' : '',
+                        'inline-flex h-7 w-7 items-center justify-center rounded-[5px] border-2 text-[var(--text-h)] transition-colors',
+                        annotationTool === 'circle'
+                          ? 'border-transparent bg-[var(--accent-bg)] text-[var(--accent)] hover:border-[var(--accent-border)]'
+                          : 'border-transparent bg-transparent opacity-60 hover:bg-[var(--accent-bg)] hover:opacity-100 hover:text-[var(--accent)]',
                       ].join(' ')}
                       onClick={() => setAnnotationTool((t) => (t === 'circle' ? 'none' : 'circle'))}
                       aria-pressed={annotationTool === 'circle'}
                       title="Cercles (1 clic)"
                     >
-                      ◯
+                      <Circle className="h-3 w-3" strokeWidth={2.25} aria-hidden />
+                    </button>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <button
+                      type="button"
+                      className={[
+                        'counter inline-flex h-7 w-7 items-center justify-center !p-0 text-sm',
+                        engineBuildOn ? 'border-[var(--accent)] bg-[var(--accent-bg)] text-[var(--accent)]' : '',
+                      ].join(' ')}
+                      aria-pressed={engineBuildOn}
+                      aria-label="Analyse Stockfish"
+                      title="Analyse Stockfish (position + arbre d’ouverture)"
+                      onClick={() => setEngineBuildOn((v) => !v)}
+                    >
+                      <Brain className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
+                    </button>
+                    <button
+                      type="button"
+                      className="counter flex-shrink-0 !px-2 !py-1 text-sm"
+                      aria-label="Paramètres de l'échiquier"
+                      title="Paramètres"
+                      onClick={() => setSettingsOpen(true)}
+                    >
+                      ⚙
                     </button>
                   </div>
                 </div>
-                <Board
-                  fen={currentFen}
-                  dests={isAnnotating ? new Map<Key, Key[]>() : boardDests}
-                  turnColor={turnColor}
-                  orientation={boardOrientation}
-                  onMove={isAnnotating ? undefined : onBoardMoveBuild}
-                  lastMove={undefined}
-                  selectedSquare={annotationTool === 'arrow' ? pendingArrowFrom : null}
-                  drawableEnabled={showBoardAnnotations}
-                  drawableVisible={showBoardAnnotations && mode === 'build'}
-                  shapes={currentShapes}
-                  onShapesChange={(next) => {
-                    setShapesByFen((prev) => ({ ...prev, [currentFen]: next }))
-                  }}
-                  annotationMode={isAnnotating}
-                  onAnnotateStart={onAnnotateStart}
-                  onAnnotateEnd={onAnnotateEnd}
-                />
+                <div className="flex items-stretch justify-center gap-2">
+                  {engineBuildOn && mode === 'build' ? (
+                    <div className="flex w-11 shrink-0 flex-col items-center gap-1 self-stretch pt-0.5">
+                      <div className="min-h-[2.25rem] text-center font-mono text-[10px] leading-tight text-[var(--text-h)]">
+                        {positionEvalBusy ? '…' : formatEval(positionEval)}
+                      </div>
+                      <EvalBar eval={positionEval} className="min-h-0 w-3 flex-1" />
+                    </div>
+                  ) : null}
+                  <div className={engineBuildOn && mode === 'build' ? 'min-w-0 flex-1' : 'w-full'}>
+                    <Board
+                      fen={currentFen}
+                      dests={isAnnotating ? new Map<Key, Key[]>() : boardDests}
+                      turnColor={turnColor}
+                      orientation={boardOrientation}
+                      onMove={isAnnotating ? undefined : onBoardMoveBuild}
+                      lastMove={undefined}
+                      selectedSquare={annotationTool === 'arrow' ? pendingArrowFrom : null}
+                      drawableEnabled={showBoardAnnotations}
+                      drawableVisible={showBoardAnnotations && mode === 'build'}
+                      shapes={currentShapes}
+                      annotationAutoShapes={annotationPreviewAutoShapes}
+                      onShapesChange={(next) => {
+                        setShapesByFen((prev) => ({ ...prev, [currentFen]: next }))
+                      }}
+                      annotationMode={isAnnotating}
+                      annotateVariant={
+                        isAnnotating ? (annotationTool === 'arrow' ? 'arrow' : 'circle') : null
+                      }
+                      onAnnotateStart={onAnnotateStart}
+                      onAnnotateMove={onAnnotateMove}
+                      onAnnotateEnd={onAnnotateEnd}
+                    />
+                  </div>
+                </div>
 
                 {mode === 'build' ? (
                   <OpeningExplorer
@@ -1438,6 +1818,8 @@ export function BuildMode() {
                     collapsed={openingExplorerCollapsed}
                     onToggleCollapsed={() => setOpeningExplorerCollapsed((v) => !v)}
                     onPlayMove={(uci) => void onPlayExplorerMove(uci)}
+                    stockfishActive={engineBuildOn}
+                    stockfishEvaluateFen={engineBuildOn ? stockfishEvaluateFen : undefined}
                   />
                 ) : null}
               </div>
@@ -1514,6 +1896,19 @@ export function BuildMode() {
           {modal.fullCount === 0 ? (
             <div className="mt-2 text-sm opacity-80">Aucune position entraînable trouvée.</div>
           ) : null}
+
+          <div className="mt-4 flex items-center justify-between gap-3 border-t border-[var(--border)] pt-3">
+            <span className="text-[var(--text-h)]">Entraîner la ligne principale seulement (ta couleur)</span>
+            <button
+              type="button"
+              className={['toggle-switch', trainMainLineOnly ? 'is-on' : ''].join(' ')}
+              role="switch"
+              aria-checked={trainMainLineOnly}
+              onClick={() => setTrainMainLineOnly((v) => !v)}
+            >
+              <span className="toggle-thumb" />
+            </button>
+          </div>
         </ModalFrame>
       ) : null}
 
@@ -1579,6 +1974,19 @@ export function BuildMode() {
             {!modal.hasSelection ? (
               <div className="text-xs opacity-80">Sélectionne un coup dans l’arbre pour activer ce mode.</div>
             ) : null}
+
+            <div className="flex items-center justify-between gap-3 border-t border-[var(--border)] pt-3">
+              <span className="text-[var(--text-h)]">Entraîner la ligne principale seulement (ta couleur)</span>
+              <button
+                type="button"
+                className={['toggle-switch', trainMainLineOnly ? 'is-on' : ''].join(' ')}
+                role="switch"
+                aria-checked={trainMainLineOnly}
+                onClick={() => setTrainMainLineOnly((v) => !v)}
+              >
+                <span className="toggle-thumb" />
+              </button>
+            </div>
           </div>
         </ModalFrame>
       ) : null}
@@ -1619,6 +2027,54 @@ export function BuildMode() {
             passed={modal.passed}
             failed={modal.failed}
           />
+        </ModalFrame>
+      ) : null}
+
+      {modal?.kind === 'confirmDeleteRepertoire' ? (
+        <ModalFrame
+          title="Supprimer le répertoire"
+          onClose={() => setModal(null)}
+          actions={
+            <div className="flex gap-2">
+              <button type="button" className="counter" onClick={() => setModal(null)}>
+                Annuler
+              </button>
+              <button
+                type="button"
+                className="counter"
+                onClick={() => {
+                  if (modal?.kind !== 'confirmDeleteRepertoire') return
+                  const rep = modal.repertoire
+                  setModal(null)
+                  void (async () => {
+                    setBusy(true)
+                    setToast(null)
+                    try {
+                      await deleteRepertoire(rep.id)
+                      const reps = await refreshRepertoireOverview()
+                      if (activeRepertoireId === rep.id) {
+                        setActiveRepertoireId(reps[0]?.id ?? null)
+                        setView('home')
+                      }
+                      if (shareTarget?.id === rep.id) setShareTarget(null)
+                      if (renameTarget?.id === rep.id) setRenameTarget(null)
+                    } catch {
+                      setToast({ type: 'error', message: 'Impossible de supprimer ce répertoire.' })
+                    } finally {
+                      setBusy(false)
+                    }
+                  })()
+                }}
+              >
+                Supprimer
+              </button>
+            </div>
+          }
+        >
+          <div className="text-sm">
+            Supprimer définitivement <span className="font-medium">{modal.repertoire.title}</span> et toutes ses
+            positions ?
+          </div>
         </ModalFrame>
       ) : null}
 
@@ -1677,12 +2133,67 @@ export function BuildMode() {
         </ModalFrame>
       ) : null}
 
+      {renameTarget ? (
+        <ModalFrame
+          title="Renommer le répertoire"
+          onClose={() => setRenameTarget(null)}
+          actions={
+            <div className="flex gap-2">
+              <button type="button" className="counter" onClick={() => setRenameTarget(null)}>
+                Annuler
+              </button>
+              <button
+                type="button"
+                className="counter"
+                disabled={!renameDraft.trim()}
+                onClick={() => {
+                  const t = renameDraft.trim().slice(0, 80)
+                  if (!t || !renameTarget) return
+                  void (async () => {
+                    setBusy(true)
+                    setToast(null)
+                    try {
+                      await updateRepertoireTitle(renameTarget.id, t)
+                      await refreshRepertoireOverview()
+                      if (activeRepertoireId === renameTarget.id) {
+                        const rep = await getRepertoire(renameTarget.id)
+                        setActiveRepertoire(rep ?? null)
+                      }
+                      setRenameTarget(null)
+                    } catch {
+                      setToast({ type: 'error', message: 'Impossible de renommer le répertoire.' })
+                    } finally {
+                      setBusy(false)
+                    }
+                  })()
+                }}
+              >
+                Enregistrer
+              </button>
+            </div>
+          }
+        >
+          <label className="block text-sm text-[var(--text-h)]" htmlFor="rename-rep-title">
+            Nom
+          </label>
+          <input
+            id="rename-rep-title"
+            className="mt-2 w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm"
+            value={renameDraft}
+            onChange={(e) => setRenameDraft(e.target.value)}
+            maxLength={80}
+            autoFocus
+          />
+        </ModalFrame>
+      ) : null}
+
       {settingsOpen ? (
         <SettingsPopup
           fen={currentFen}
           flipBoard={flipBoard}
           showDests={showDests}
           showBoardAnnotations={showBoardAnnotations}
+          showAnnotationsToggle={mode === 'build'}
           onClose={() => setSettingsOpen(false)}
           onCopyFen={() => void navigator.clipboard.writeText(currentFen)}
           onToggleFlip={() => setFlipBoard((v) => !v)}
@@ -1690,6 +2201,25 @@ export function BuildMode() {
           onToggleAnnotations={() => setShowBoardAnnotations((v) => !v)}
         />
       ) : null}
+
+      <ImportRepertoireModal
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        onImported={(id) => {
+          void (async () => {
+            await refreshRepertoireOverview()
+            setActiveRepertoireId(id)
+            setMode('build')
+            setView('session')
+            setImportOpen(false)
+          })()
+        }}
+      />
+      <ShareRepertoireModal
+        open={shareTarget != null}
+        repertoireTitle={shareTarget?.title ?? ''}
+        onClose={() => setShareTarget(null)}
+      />
     </div>
   )
 }
@@ -1761,6 +2291,7 @@ function SettingsPopup({
   flipBoard,
   showDests,
   showBoardAnnotations,
+  showAnnotationsToggle,
   onClose,
   onCopyFen,
   onToggleFlip,
@@ -1771,6 +2302,7 @@ function SettingsPopup({
   flipBoard: boolean
   showDests: boolean
   showBoardAnnotations: boolean
+  showAnnotationsToggle: boolean
   onClose: () => void
   onCopyFen: () => void
   onToggleFlip: () => void
@@ -1786,11 +2318,13 @@ function SettingsPopup({
       <div className="space-y-4 text-left text-sm">
         <ToggleRow label="Inverser l'échiquier" checked={flipBoard} onChange={onToggleFlip} />
         <ToggleRow label="Afficher les destinations" checked={showDests} onChange={onToggleDests} />
-        <ToggleRow
-          label="Afficher annotations"
-          checked={showBoardAnnotations}
-          onChange={onToggleAnnotations}
-        />
+        {showAnnotationsToggle ? (
+          <ToggleRow
+            label="Afficher annotations"
+            checked={showBoardAnnotations}
+            onChange={onToggleAnnotations}
+          />
+        ) : null}
         <div>
           <div className="mb-1 flex items-center justify-between gap-2">
             <span className="text-[var(--text-h)]">FEN</span>
@@ -1837,11 +2371,19 @@ function HomeSection({
   repertoires,
   repertoireCounts,
   onOpen,
+  onExportPgn,
+  onShare,
+  onRename,
+  onDelete,
 }: {
   title: string
   repertoires: Repertoire[]
   repertoireCounts: RepertoireCounts
   onOpen: (id: string) => void
+  onExportPgn: (id: string) => void | Promise<void>
+  onShare: (id: string, title: string) => void
+  onRename: (repertoire: Repertoire) => void
+  onDelete: (repertoire: Repertoire) => void
 }) {
   return (
     <section>
@@ -1851,19 +2393,81 @@ function HomeSection({
           <div className="text-sm opacity-80">Aucun répertoire.</div>
         ) : (
           repertoires.map((r) => (
-            <button
+            <div
               key={r.id}
-              type="button"
-              className="w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-left hover:shadow-[var(--shadow)]"
-              onClick={() => {
-                onOpen(r.id)
-              }}
+              className="flex items-stretch gap-0 overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg)] hover:shadow-[var(--shadow)]"
             >
-              <div className="text-sm font-medium text-[var(--text-h)]">{r.title}</div>
-              <div className="mt-0.5 text-xs opacity-80">
-                {repertoireCounts[r.id] ?? 0} positions enregistrées
+              <div className="flex min-w-0 flex-1 flex-col px-3 py-2">
+                <div className="flex min-w-0 items-center gap-1">
+                  <button
+                    type="button"
+                    className="min-w-0 flex-1 truncate text-left text-sm font-medium text-[var(--text-h)]"
+                    onClick={() => onOpen(r.id)}
+                  >
+                    {r.title}
+                  </button>
+                  <div className="flex shrink-0 flex-row items-center gap-0.5">
+                    <button
+                      type="button"
+                      className="inline-flex h-6 w-6 items-center justify-center rounded text-[var(--text)] opacity-70 hover:bg-[var(--accent-bg)] hover:text-[var(--accent)] hover:opacity-100"
+                      aria-label={`Renommer ${r.title}`}
+                      title="Renommer"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onRename(r)
+                      }}
+                    >
+                      <Pencil className="h-3.5 w-3.5" aria-hidden />
+                    </button>
+                    <button
+                      type="button"
+                      className="inline-flex h-6 w-6 items-center justify-center rounded text-[var(--text)] opacity-70 hover:bg-red-500/15 hover:text-red-600 hover:opacity-100 dark:hover:text-red-400"
+                      aria-label={`Supprimer ${r.title}`}
+                      title="Supprimer le répertoire"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onDelete(r)
+                      }}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" aria-hidden />
+                    </button>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="mt-0.5 w-full text-left text-xs opacity-80 hover:opacity-100"
+                  onClick={() => onOpen(r.id)}
+                >
+                  {repertoireCounts[r.id] ?? 0} positions enregistrées
+                </button>
               </div>
-            </button>
+              <div className="flex shrink-0 flex-col justify-center gap-0.5 border-l border-[var(--border)] px-0.5 py-1">
+                <button
+                  type="button"
+                  className="inline-flex h-7 w-7 items-center justify-center rounded text-[var(--text)] opacity-70 hover:bg-[var(--accent-bg)] hover:text-[var(--accent)] hover:opacity-100"
+                  aria-label={`Télécharger ${r.title} en PGN`}
+                  title="Télécharger PGN"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    void onExportPgn(r.id)
+                  }}
+                >
+                  <Download className="h-3.5 w-3.5" aria-hidden />
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex h-7 w-7 items-center justify-center rounded text-[var(--text)] opacity-70 hover:bg-[var(--accent-bg)] hover:text-[var(--accent)] hover:opacity-100"
+                  aria-label={`Partager ${r.title}`}
+                  title="Partager"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onShare(r.id, r.title)
+                  }}
+                >
+                  <Share2 className="h-3.5 w-3.5" aria-hidden />
+                </button>
+              </div>
+            </div>
           ))
         )}
       </div>

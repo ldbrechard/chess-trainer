@@ -11,6 +11,22 @@ function siblingSortKey(m: Move): string {
   return `${m.createdAt ?? ''}\t${m.id}`
 }
 
+/** Main line first, then stable creation order. */
+export function compareSiblings(a: Move, b: Move): number {
+  const ma = a.isMainLine ? 1 : 0
+  const mb = b.isMainLine ? 1 : 0
+  if (ma !== mb) return mb - ma
+  return siblingSortKey(a).localeCompare(siblingSortKey(b))
+}
+
+export function pickMainLineChild(children: Move[]): Move | undefined {
+  if (children.length === 0) return undefined
+  const flagged = children.filter((c) => c.isMainLine)
+  if (flagged.length === 1) return flagged[0]
+  if (flagged.length > 1) return [...children].sort(compareSiblings)[0]
+  return [...children].sort(compareSiblings)[0]
+}
+
 export function buildMoveForest(moves: Move[]): MoveForest {
   const byParent = new Map<string | null, Move[]>()
   for (const m of moves) {
@@ -22,7 +38,7 @@ export function buildMoveForest(moves: Move[]): MoveForest {
 
   const build = (parentId: string | null): MoveNode[] => {
     const list = byParent.get(parentId) ?? []
-    list.sort((a, b) => siblingSortKey(a).localeCompare(siblingSortKey(b)))
+    list.sort(compareSiblings)
     return list.map((move) => ({
       move,
       children: build(move.id),

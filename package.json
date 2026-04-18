@@ -4,18 +4,22 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "postinstall": "node scripts/copy-stockfish.mjs",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@mliebelt/pgn-parser": "^1.4.19",
     "@supabase/supabase-js": "^2.49.8",
     "chess.js": "^1.4.0",
     "chessground": "^9.2.1",
+    "dexie": "^4.2.0",
     "lucide-react": "^1.8.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
+    "stockfish": "^17.1.0",
     "zustand": "^5.0.12"
   },
   "devDependencies": {

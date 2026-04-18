@@ -1,4 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { Chess } from 'chess.js'
+
+import type { EngineEval } from '../../lib/stockfishClient'
+import { formatEval } from '../../lib/stockfishClient'
 
 type ExplorerMove = {
   uci: string
@@ -24,9 +28,32 @@ type Props = {
   collapsed?: boolean
   onToggleCollapsed?: () => void
   onPlayMove?: (uci: string) => void
+  /** Stockfish : évalue chaque coup suggéré (FEN après le coup). */
+  stockfishActive?: boolean
+  stockfishEvaluateFen?: (fen: string) => Promise<EngineEval>
 }
 
 const RATING_BUCKETS = [1600, 1800, 2000, 2200, 2500] as const
+
+/** Index 0..3 = tranche [buckets[i]–buckets[i+1]] pour l’API Lichess (ratings inclus). */
+const RATING_BANDS = [
+  { label: '1600–1800', lo: 0, hi: 1 },
+  { label: '1800–2000', lo: 1, hi: 2 },
+  { label: '2000–2200', lo: 2, hi: 3 },
+  { label: '2200–2500', lo: 3, hi: 4 },
+] as const
+
+function ratingsParamFromBands(selected: Set<number>): string {
+  if (selected.size === 0) return RATING_BUCKETS.join(',')
+  const values = new Set<number>()
+  for (const bi of selected) {
+    const b = RATING_BANDS[bi]
+    if (!b) continue
+    values.add(RATING_BUCKETS[b.lo])
+    values.add(RATING_BUCKETS[b.hi])
+  }
+  return [...values].sort((a, b) => a - b).join(',')
+}
 
 function clampPct(n: number) {
   if (!Number.isFinite(n)) return 0
@@ -46,15 +73,37 @@ function fmtInt(n: number) {
   }
 }
 
+function fenAfterUci(baseFen: string, uci: string): string | null {
+  const c = new Chess()
+  try {
+    c.load(baseFen)
+  } catch {
+    return null
+  }
+  const t = uci.trim()
+  if (t.length < 4) return null
+  const from = t.slice(0, 2)
+  const to = t.slice(2, 4)
+  const promotion = t.length >= 5 ? (t[4] as 'q' | 'r' | 'b' | 'n') : undefined
+  const m = c.move({ from, to, promotion })
+  return m ? c.fen() : null
+}
+
 function isLikely429(err: unknown) {
   if (typeof err !== 'object' || err === null || !('message' in err)) return false
   const msg = (err as { message?: unknown }).message
   return typeof msg === 'string' && msg.includes('429')
 }
 
-export function OpeningExplorer({ fen, collapsed = false, onToggleCollapsed, onPlayMove }: Props) {
-  const [minIdx, setMinIdx] = useState(0)
-  const [maxIdx, setMaxIdx] = useState(RATING_BUCKETS.length - 1)
+export function OpeningExplorer({
+  fen,
+  collapsed = false,
+  onToggleCollapsed,
+  onPlayMove,
+  stockfishActive = false,
+  stockfishEvaluateFen,
+}: Props) {
+  const [selectedBands, setSelectedBands] = useState<Set<number>>(() => new Set(RATING_BANDS.map((_, i) => i)))
   const [data, setData] = useState<ExplorerResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -64,12 +113,21 @@ export function OpeningExplorer({ fen, collapsed = false, onToggleCollapsed, onP
   const abortRef = useRef<AbortController | null>(null)
 
   const token = (import.meta.env.VITE_LICHESS_TOKEN as string | undefined | null)?.trim() ?? ''
-  const [effectiveMinIdx, effectiveMaxIdx] = minIdx <= maxIdx ? [minIdx, maxIdx] : [maxIdx, minIdx]
-  const ratingsParam = useMemo(() => {
-    const slice = RATING_BUCKETS.slice(effectiveMinIdx, effectiveMaxIdx + 1)
-    return slice.join(',')
-  }, [effectiveMaxIdx, effectiveMinIdx])
+  const ratingsParam = useMemo(() => ratingsParamFromBands(selectedBands), [selectedBands])
   const cacheKey = useMemo(() => `${fen}::ratings=${ratingsParam}`, [fen, ratingsParam])
+
+  const toggleBand = (bandIndex: number) => {
+    setSelectedBands((prev) => {
+      const next = new Set(prev)
+      if (next.has(bandIndex)) {
+        if (next.size <= 1) return prev
+        next.delete(bandIndex)
+      } else {
+        next.add(bandIndex)
+      }
+      return next
+    })
+  }
 
   useEffect(() => {
     if (!token) {
@@ -153,6 +211,43 @@ export function OpeningExplorer({ fen, collapsed = false, onToggleCollapsed, onP
   }, [cacheKey, fen, ratingsParam, token])
 
   const moves = data?.moves ?? []
+  const [engineLineByUci, setEngineLineByUci] = useState<Record<string, string>>({})
+  const uciListKey = useMemo(() => (data?.moves ?? []).map((m) => m.uci).join('|'), [data])
+
+  useEffect(() => {
+    if (!stockfishActive || !stockfishEvaluateFen || moves.length === 0) {
+      setEngineLineByUci({})
+      return
+    }
+    let cancelled = false
+    const init: Record<string, string> = {}
+    for (const m of moves) init[m.uci] = '…'
+    setEngineLineByUci(init)
+
+    void (async () => {
+      for (const m of moves) {
+        if (cancelled) return
+        const childFen = fenAfterUci(fen, m.uci)
+        if (!childFen) {
+          if (!cancelled) setEngineLineByUci((p) => ({ ...p, [m.uci]: '—' }))
+          continue
+        }
+        try {
+          const ev = await stockfishEvaluateFen(childFen)
+          if (cancelled) return
+          if (!cancelled) setEngineLineByUci((p) => ({ ...p, [m.uci]: formatEval(ev) }))
+        } catch {
+          if (cancelled) return
+          if (!cancelled) setEngineLineByUci((p) => ({ ...p, [m.uci]: '—' }))
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `moves` keyed by uciListKey
+  }, [fen, stockfishActive, stockfishEvaluateFen, uciListKey])
 
   return (
     <div className="mt-4 rounded-md border border-[var(--border)] bg-[var(--bg)] p-3 text-left text-sm">
@@ -185,49 +280,28 @@ export function OpeningExplorer({ fen, collapsed = false, onToggleCollapsed, onP
       {collapsed ? null : (
         <>
           <div className="mt-3">
-            <div className="flex items-center justify-between gap-2">
-              <div className="text-xs font-medium text-[var(--text-h)]">ELO</div>
-              <div className="font-mono text-[10px] opacity-80">
-                {RATING_BUCKETS[effectiveMinIdx]}+ → {RATING_BUCKETS[effectiveMaxIdx]}+
-              </div>
-            </div>
-
-            <div className="mt-2">
-              <div className="relative h-8">
-                {/* Two thumbs, one visual slider */}
-                <input
-                  type="range"
-                  min={0}
-                  max={RATING_BUCKETS.length - 1}
-                  step={1}
-                  value={effectiveMinIdx}
-                  onChange={(e) => {
-                    const v = Number(e.target.value)
-                    setMinIdx(v)
-                    if (v > maxIdx) setMaxIdx(v)
-                  }}
-                  className="absolute inset-0 w-full appearance-none bg-transparent"
-                  aria-label="ELO min"
-                />
-                <input
-                  type="range"
-                  min={0}
-                  max={RATING_BUCKETS.length - 1}
-                  step={1}
-                  value={effectiveMaxIdx}
-                  onChange={(e) => {
-                    const v = Number(e.target.value)
-                    setMaxIdx(v)
-                    if (v < minIdx) setMinIdx(v)
-                  }}
-                  className="absolute inset-0 w-full appearance-none bg-transparent"
-                  aria-label="ELO max"
-                />
-              </div>
-              <div className="mt-1 flex justify-between font-mono text-[10px] opacity-70">
-                <span>{RATING_BUCKETS[0]}+</span>
-                <span>{RATING_BUCKETS[RATING_BUCKETS.length - 1]}+</span>
-              </div>
+            <div className="text-xs font-medium text-[var(--text-h)]">ELO (tranches)</div>
+            <p className="mt-1 text-[10px] opacity-70">Clique pour activer / désactiver (au moins une tranche).</p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {RATING_BANDS.map((band, i) => {
+                const on = selectedBands.has(i)
+                return (
+                  <button
+                    key={band.label}
+                    type="button"
+                    className={[
+                      'rounded-md border px-2 py-1 font-mono text-xs transition-colors',
+                      on
+                        ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
+                        : 'border-[var(--border)] bg-[var(--code-bg)] text-[var(--text-h)] opacity-70 hover:opacity-100',
+                    ].join(' ')}
+                    aria-pressed={on}
+                    onClick={() => toggleBand(i)}
+                  >
+                    {band.label}
+                  </button>
+                )
+              })}
             </div>
           </div>
 
@@ -279,7 +353,14 @@ export function OpeningExplorer({ fen, collapsed = false, onToggleCollapsed, onP
                   title="Jouer ce coup"
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <div className="font-mono text-[var(--text-h)]">{m.san}</div>
+                    <div className="flex min-w-0 items-baseline gap-2">
+                      <span className="font-mono text-[var(--text-h)]">{m.san}</span>
+                      {stockfishActive && stockfishEvaluateFen ? (
+                        <span className="font-mono text-[10px] text-amber-700 tabular-nums dark:text-amber-400">
+                          {engineLineByUci[m.uci] ?? '…'}
+                        </span>
+                      ) : null}
+                    </div>
                     <div className="font-mono text-xs opacity-80">{fmtInt(total)}</div>
                   </div>
                   <div className="mt-1 overflow-hidden rounded border border-[var(--border)] bg-[var(--code-bg)]">

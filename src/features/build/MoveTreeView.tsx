@@ -78,7 +78,7 @@ function normalizeNagToken(t: string): string {
   return s
 }
 
-function formatMoveWithNag(move: Move): string {
+export function formatMoveWithNag(move: Move): string {
   const raw = move.nag?.trim() ?? ''
   if (!raw) return move.notation
 
@@ -153,7 +153,7 @@ function renderForest(
   )
 }
 
-function moveNumberPrefix(depth: number, atLineStart: boolean): string {
+export function moveNumberPrefix(depth: number, atLineStart: boolean): string {
   const moveNo = Math.floor(depth / 2) + 1
   const isWhitePly = depth % 2 === 0
   if (isWhitePly) return `${moveNo}. `
