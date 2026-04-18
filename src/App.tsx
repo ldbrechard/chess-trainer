@@ -2,7 +2,6 @@ import './App.css'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { AuthScreen } from './components/AuthScreen'
-import { UserProfileChrome } from './components/UserProfileChrome'
 import { BuildMode } from './features/build/BuildMode'
 import { getSupabaseClient, isSupabaseConfigured } from './lib/supabaseClient'
 import { AppSyncProvider } from './sync/AppSyncProvider'
@@ -96,7 +95,6 @@ function AppShell() {
           </div>
         </div>
       ) : null}
-      <UserProfileChrome />
       <BuildMode />
     </AppSyncProvider>
   )

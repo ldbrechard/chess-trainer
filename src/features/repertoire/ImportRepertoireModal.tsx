@@ -1,15 +1,11 @@
 import { CheckCircle2, Link2, Upload } from 'lucide-react'
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useState } from 'react'
 import { bulkInsertMovesForRepertoire, createRepertoire } from '../../db/repertoireRepo'
 import type { Side } from '../../db/schema'
 import { fetchLichessStudyPgnText, studyPageUrlToPgnFetchUrl } from '../../lib/lichessStudyPgn'
 import { tryBuildImportPreview, type PgnImportPreview } from '../../lib/pgnImportExport'
 
 type Step = 'source' | 'preview'
-
-const PGN_HELP =
-  'Chess.com : ouvre la partie ou l’ouverture → menu (⋮) ou « Share » → « Export » / « Copy PGN ». ' +
-  'Lichess : partie → bouton de téléchargement sous l’échiquier ; étude → menu « Share » puis « Study PGN » ou copie du lien public.'
 
 type Props = {
   open: boolean
@@ -27,9 +23,61 @@ async function readFileAsUtf8Text(file: File): Promise<string> {
   })
 }
 
+function PgnHelpTooltip({ id }: { id: string }) {
+  return (
+    <div
+      id={id}
+      role="tooltip"
+      className="pointer-events-none invisible absolute left-0 top-full z-[80] -mt-1 w-[min(100vw-2rem,19rem)] rounded-md border border-neutral-700 bg-black p-2 pt-2.5 text-left text-[10px] leading-snug text-white opacity-0 shadow-lg transition-opacity duration-100 group-hover:pointer-events-auto group-hover:visible group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:visible group-focus-within:opacity-100"
+    >
+      <div className="max-h-[min(65vh,22rem)] space-y-2 overflow-y-auto">
+        <p className="m-0 font-semibold text-white">Comment obtenir du PGN ?</p>
+
+        <section>
+          <h4 className="m-0 font-semibold text-neutral-300">Fichier</h4>
+          <ul className="mt-0.5 list-disc space-y-0.5 pl-3.5 text-neutral-100">
+            <li>
+              <span className="font-medium text-white">Upload PGN</span> ouvre le sélecteur (
+              <span className="font-mono">.pgn</span> ou texte).
+            </li>
+            <li>Vous pouvez aussi coller dans la zone de texte.</li>
+          </ul>
+        </section>
+
+        <section>
+          <h4 className="m-0 font-semibold text-neutral-300">Lichess — étude</h4>
+          <ul className="mt-0.5 list-disc space-y-0.5 pl-3.5 text-neutral-100">
+            <li>Étude → menu Share → copier l’URL (ex. <span className="break-all font-mono text-[9px]">lichess.org/study/…</span>).</li>
+            <li>
+              Onglet <span className="font-medium text-white">URL Lichess</span> → coller →{' '}
+              <span className="font-medium text-white">Charger</span>.
+            </li>
+            <li>Lien public (sans compte).</li>
+          </ul>
+        </section>
+
+        <section>
+          <h4 className="m-0 font-semibold text-neutral-300">Lichess — partie</h4>
+          <ul className="mt-0.5 list-disc space-y-0.5 pl-3.5 text-neutral-100">
+            <li>Sous l’échiquier : téléchargement PGN.</li>
+            <li>Fichier ou collage dans la zone.</li>
+          </ul>
+        </section>
+
+        <section>
+          <h4 className="m-0 font-semibold text-neutral-300">Chess.com</h4>
+          <ul className="mt-0.5 list-disc space-y-0.5 pl-3.5 text-neutral-100">
+            <li>Partie / ouverture → menu (⋮) ou Share → Export ou copie PGN.</li>
+            <li>Coller ou enregistrer puis Upload PGN.</li>
+          </ul>
+        </section>
+      </div>
+    </div>
+  )
+}
+
 export function ImportRepertoireModal({ open, onClose, onImported }: Props) {
   const baseId = useId()
-  const fileInputRef = useRef<HTMLInputElement>(null)
   const [step, setStep] = useState<Step>('source')
   const [sourceTab, setSourceTab] = useState<'file' | 'url'>('file')
   const [pgnDraft, setPgnDraft] = useState('')
@@ -58,10 +106,7 @@ export function ImportRepertoireModal({ open, onClose, onImported }: Props) {
     if (!open) reset()
   }, [open, reset])
 
-  const pgnForValidation = useMemo(() => {
-    if (sourceTab === 'file') return pgnDraft
-    return pgnDraft
-  }, [sourceTab, pgnDraft])
+  const pgnForValidation = pgnDraft
 
   useEffect(() => {
     if (!open || step !== 'source') return
@@ -166,20 +211,21 @@ export function ImportRepertoireModal({ open, onClose, onImported }: Props) {
           </button>
         </div>
 
-        <div className="mt-2 flex items-center gap-1.5 text-xs text-[var(--text)]">
+        <div className="group relative mt-2 flex w-fit items-center gap-1.5 text-xs text-[var(--text)]">
           <span>Aide export PGN</span>
           <span
-            className="inline-flex h-5 w-5 cursor-help items-center justify-center rounded-full border border-[var(--border)] text-[11px] font-semibold text-[var(--text-h)]"
-            title={PGN_HELP}
+            className="inline-flex h-5 w-5 cursor-help items-center justify-center rounded-full border border-[var(--border)] bg-[var(--bg)] text-[10px] font-semibold text-[var(--text-h)] outline-none ring-offset-2 hover:border-[var(--accent-border)] focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+            tabIndex={0}
+            aria-describedby={`${baseId}-pgn-help`}
           >
-            ?
+            ?<span className="sr-only">Aide import PGN</span>
           </span>
+          <PgnHelpTooltip id={`${baseId}-pgn-help`} />
         </div>
 
         {step === 'source' ? (
           <div className="mt-4 space-y-4">
             <input
-              ref={fileInputRef}
               id={`${baseId}-file`}
               type="file"
               accept=".pgn,.PGN,.txt,text/plain,application/x-chess-pgn,application/octet-stream"
@@ -194,8 +240,10 @@ export function ImportRepertoireModal({ open, onClose, onImported }: Props) {
               <label
                 htmlFor={`${baseId}-file`}
                 className={[
-                  'counter flex flex-1 cursor-pointer items-center justify-center gap-1 text-xs',
-                  sourceTab === 'file' ? '' : 'opacity-60',
+                  'counter mb-0 flex flex-1 cursor-pointer items-center justify-center gap-1 text-xs',
+                  sourceTab === 'file'
+                    ? '!border-[var(--accent)] bg-[var(--accent-bg)] text-[var(--accent)]'
+                    : '!border-[var(--border)] bg-[var(--code-bg)] text-[var(--text-h)]',
                   busy ? 'pointer-events-none opacity-50' : '',
                 ].join(' ')}
                 onClick={() => setSourceTab('file')}
@@ -205,28 +253,26 @@ export function ImportRepertoireModal({ open, onClose, onImported }: Props) {
               </label>
               <button
                 type="button"
-                className={`counter flex-1 text-xs ${sourceTab === 'url' ? '' : 'opacity-60'}`}
+                className={[
+                  'counter mb-0 flex flex-1 items-center justify-center gap-1 text-xs',
+                  sourceTab === 'url'
+                    ? '!border-[var(--accent)] bg-[var(--accent-bg)] text-[var(--accent)]'
+                    : '!border-[var(--border)] bg-[var(--code-bg)] text-[var(--text-h)]',
+                ].join(' ')}
                 onClick={() => setSourceTab('url')}
               >
-                <Link2 className="mr-1 inline h-3.5 w-3.5 align-text-bottom" aria-hidden />
+                <Link2 className="h-3.5 w-3.5 shrink-0" aria-hidden />
                 URL Lichess
               </button>
             </div>
 
             {sourceTab === 'file' ? (
               <div>
-                <span className="block text-xs font-medium text-[var(--text-h)]">Fichier PGN</span>
-                <button
-                  type="button"
-                  className="counter mt-2 text-xs"
-                  disabled={busy}
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  Parcourir…
-                </button>
-                <p className="mt-2 text-xs opacity-75">Tu peux aussi coller du PGN ci-dessous après l’avoir ouvert dans un éditeur.</p>
+                <p className="text-xs text-[var(--text)] opacity-90">
+                  Collez le PGN ci-dessous si vous ne passez pas par un fichier.
+                </p>
                 <textarea
-                  className="mt-2 min-h-[120px] w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-2 py-2 font-mono text-xs"
+                  className="mt-2 min-h-[140px] w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-2 py-2 font-mono text-xs"
                   placeholder="Coller le PGN ici…"
                   value={pgnDraft}
                   onChange={(e) => setPgnDraft(e.target.value)}
@@ -274,9 +320,7 @@ export function ImportRepertoireModal({ open, onClose, onImported }: Props) {
                 <span className="text-red-600">{parseError}</span>
               ) : pgnForValidation.trim() ? (
                 <span className="opacity-70">Analyse…</span>
-              ) : (
-                <span className="opacity-60">Choisis un fichier ou charge une URL.</span>
-              )}
+              ) : null}
             </div>
 
             <div className="flex justify-end gap-2 border-t border-[var(--border)] pt-4">

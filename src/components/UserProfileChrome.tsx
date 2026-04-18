@@ -30,7 +30,12 @@ function syncStatusLabel(s: ReturnType<typeof useAppSync>): string {
   return 'Connecté — en attente de première sync.'
 }
 
-export function UserProfileChrome() {
+type UserProfileChromeProps = {
+  /** `fixed` : coins supérieurs droits (plein écran). `inline` : dans le flux de la page. */
+  placement?: 'fixed' | 'inline'
+}
+
+export function UserProfileChrome({ placement = 'fixed' }: UserProfileChromeProps) {
   const s = useAppSync()
   const [open, setOpen] = useState(false)
   const [statsOpen, setStatsOpen] = useState(false)
@@ -60,9 +65,14 @@ export function UserProfileChrome() {
     user?.email?.trim() ||
     (s.supabaseConfigured ? 'Non connecté' : 'Mode local')
 
+  const barClass =
+    placement === 'fixed'
+      ? 'pointer-events-auto fixed right-4 top-4 z-[60] flex items-center gap-1.5'
+      : 'flex items-center gap-1.5'
+
   return (
     <>
-      <div className="pointer-events-auto fixed right-4 top-4 z-[60] flex items-center gap-1.5">
+      <div className={barClass}>
         <SyncCloudIndicator />
         <button
           type="button"

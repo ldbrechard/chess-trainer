@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { SlidersHorizontal } from 'lucide-react'
 import { Chess } from 'chess.js'
 
 import type { EngineEval } from '../../lib/stockfishClient'
@@ -108,6 +109,8 @@ export function OpeningExplorer({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [debugUrl, setDebugUrl] = useState<string | null>(null)
+  const [eloOptionsOpen, setEloOptionsOpen] = useState(false)
+  const eloOptionsRef = useRef<HTMLDivElement>(null)
 
   const cacheRef = useRef<Map<string, ExplorerResponse>>(new Map())
   const abortRef = useRef<AbortController | null>(null)
@@ -128,6 +131,16 @@ export function OpeningExplorer({
       return next
     })
   }
+
+  useEffect(() => {
+    if (!eloOptionsOpen) return
+    const onPointer = (e: PointerEvent) => {
+      const el = eloOptionsRef.current
+      if (el && !el.contains(e.target as Node)) setEloOptionsOpen(false)
+    }
+    window.addEventListener('pointerdown', onPointer, true)
+    return () => window.removeEventListener('pointerdown', onPointer, true)
+  }, [eloOptionsOpen])
 
   useEffect(() => {
     if (!token) {
@@ -252,16 +265,64 @@ export function OpeningExplorer({
   return (
     <div className="mt-4 rounded-md border border-[var(--border)] bg-[var(--bg)] p-3 text-left text-sm">
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <button
-            type="button"
-            className="text-xs font-medium text-[var(--text-h)] hover:underline"
-            onClick={onToggleCollapsed}
-            aria-expanded={!collapsed}
-            title={collapsed ? 'Déplier' : 'Replier'}
-          >
-            {collapsed ? '▸' : '▾'} Arbre d’ouverture (Lichess)
-          </button>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <button
+              type="button"
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--text-h)] hover:underline"
+              onClick={onToggleCollapsed}
+              aria-expanded={!collapsed}
+              title={collapsed ? 'Déplier' : 'Replier'}
+            >
+              <span aria-hidden>{collapsed ? '▸' : '▾'}</span>
+              <span>Arbre d’ouverture</span>
+            </button>
+            <span className="select-none text-[10px] font-normal uppercase tracking-wide opacity-45">Lichess</span>
+            <div className="relative shrink-0" ref={eloOptionsRef}>
+              <button
+                type="button"
+                className={[
+                  'counter inline-flex h-7 w-7 items-center justify-center !p-0',
+                  eloOptionsOpen ? 'border-[var(--accent)] bg-[var(--accent-bg)] text-[var(--accent)]' : '',
+                ].join(' ')}
+                aria-expanded={eloOptionsOpen}
+                aria-label="Options ELO (tranches de classement)"
+                title="Options ELO"
+                onClick={() => setEloOptionsOpen((v) => !v)}
+              >
+                <SlidersHorizontal className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
+              </button>
+              {eloOptionsOpen ? (
+                <div className="absolute left-0 top-full z-[70] mt-1 w-[min(calc(100vw-2rem),18rem)] rounded-md border border-[var(--border)] bg-[var(--social-bg)] p-3 text-left shadow-lg sm:left-auto sm:right-0">
+                  <div className="text-xs font-medium text-[var(--text-h)]">ELO (tranches)</div>
+                  <p className="mt-1 text-[10px] leading-snug opacity-70">
+                    Clique pour activer / désactiver (au moins une tranche).
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {RATING_BANDS.map((band, i) => {
+                      const on = selectedBands.has(i)
+                      return (
+                        <button
+                          key={band.label}
+                          type="button"
+                          className={[
+                            'rounded-md border px-2 py-1 font-mono text-xs transition-colors',
+                            on
+                              ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
+                              : 'border-[var(--border)] bg-[var(--code-bg)] text-[var(--text-h)] opacity-70 hover:opacity-100',
+                          ].join(' ')}
+                          aria-pressed={on}
+                          onClick={() => toggleBand(i)}
+                        >
+                          {band.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </div>
           <div className="mt-1 truncate text-xs opacity-80">
             {data?.opening?.name ? (
               <>
@@ -274,37 +335,11 @@ export function OpeningExplorer({
             )}
           </div>
         </div>
-        <div className="text-xs opacity-80">{loading ? '…' : null}</div>
+        <div className="shrink-0 text-xs opacity-80">{loading ? '…' : null}</div>
       </div>
 
       {collapsed ? null : (
         <>
-          <div className="mt-3">
-            <div className="text-xs font-medium text-[var(--text-h)]">ELO (tranches)</div>
-            <p className="mt-1 text-[10px] opacity-70">Clique pour activer / désactiver (au moins une tranche).</p>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {RATING_BANDS.map((band, i) => {
-                const on = selectedBands.has(i)
-                return (
-                  <button
-                    key={band.label}
-                    type="button"
-                    className={[
-                      'rounded-md border px-2 py-1 font-mono text-xs transition-colors',
-                      on
-                        ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
-                        : 'border-[var(--border)] bg-[var(--code-bg)] text-[var(--text-h)] opacity-70 hover:opacity-100',
-                    ].join(' ')}
-                    aria-pressed={on}
-                    onClick={() => toggleBand(i)}
-                  >
-                    {band.label}
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-
           {error ? (
             <div className="mt-3 rounded-md border border-red-400/40 bg-red-500/10 px-2 py-1 text-xs text-red-700 dark:text-red-200">
               <div className="whitespace-pre-wrap">{error}</div>

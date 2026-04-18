@@ -6,6 +6,7 @@ import type { DrawShape } from 'chessground/draw'
 
 import { Board } from '../../components/Board'
 import { EvalBar } from '../../components/EvalBar'
+import { UserProfileChrome } from '../../components/UserProfileChrome'
 import { computeDests } from '../../chess/computeDests'
 import { buildMoveForest, pathToIdSet, pickMainLineChild } from '../../chess/moveTree'
 import type { Move, Repertoire, Side } from '../../db/schema'
@@ -29,6 +30,7 @@ import { formatEval, StockfishBrowserEngine } from '../../lib/stockfishClient'
 import { ImportRepertoireModal } from '../repertoire/ImportRepertoireModal'
 import { ShareRepertoireModal } from '../repertoire/ShareRepertoireModal'
 import { MoveTreeView, formatMoveWithNag, moveNumberPrefix } from './MoveTreeView'
+import openingIslandIcon from '../../assets/icon.png'
 import { OpeningExplorer } from './OpeningExplorer'
 
 type Toast = { type: 'info' | 'error'; message: string } | null
@@ -99,6 +101,7 @@ function expectedTrainReplies(children: Move[], mainLineOnly: boolean): Move[] {
 export function BuildMode() {
   const [view, setView] = useState<View>('home')
   const [importOpen, setImportOpen] = useState(false)
+  const [createRepertoireOpen, setCreateRepertoireOpen] = useState(false)
   const [shareTarget, setShareTarget] = useState<{ id: string; title: string } | null>(null)
   const [renameTarget, setRenameTarget] = useState<Repertoire | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
@@ -1100,7 +1103,7 @@ export function BuildMode() {
     trainTotal,
   ])
 
-  const handleCreate = async (title: string, side: Side) => {
+  const handleCreate = async (title: string, side: Side): Promise<boolean> => {
     setBusy(true)
     setToast(null)
     try {
@@ -1108,9 +1111,10 @@ export function BuildMode() {
       await refreshRepertoireOverview()
       setActiveRepertoireId(id)
       setMode('build')
+      return true
     } catch {
       setToast({ type: 'error', message: 'Impossible de créer le répertoire.' })
-      // Do not crash the UI; surface via toast.
+      return false
     } finally {
       setBusy(false)
     }
@@ -1236,65 +1240,74 @@ export function BuildMode() {
   ])
 
   return (
-    <div className="flex flex-1 flex-col gap-6 px-4 py-8 pr-16 sm:pr-20">
+    <div className="flex flex-1 flex-col gap-6 px-4 py-8">
       {view === 'home' ? (
         <div className="mx-auto w-full max-w-[920px] text-left">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <h1>Répertoires</h1>
-            <button type="button" className="counter text-sm" onClick={() => setImportOpen(true)}>
-              Importer un répertoire
-            </button>
-          </div>
-          <p>Sélectionne un répertoire pour ouvrir Build/Train.</p>
-
-          <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-[1fr_340px]">
-            <div className="rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-4 shadow-[var(--shadow)]">
-              <div className="space-y-5">
-                <HomeSection
-                  title="Blancs"
-                  repertoires={whiteRepertoires}
-                  repertoireCounts={repertoireCounts}
-                  onOpen={(id) => {
-                    setActiveRepertoireId(id)
-                    setMode('build')
-                    setView('session')
-                  }}
-                  onExportPgn={handleExportPgn}
-                  onShare={(id, title) => setShareTarget({ id, title })}
-                  onRename={(r) => setRenameTarget(r)}
-                  onDelete={(r) => setModal({ kind: 'confirmDeleteRepertoire', repertoire: r })}
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-3">
+                <img
+                  src={openingIslandIcon}
+                  alt=""
+                  width={48}
+                  height={48}
+                  className="h-12 w-12 shrink-0 rounded-xl object-cover shadow-sm"
                 />
-                <HomeSection
-                  title="Noirs"
-                  repertoires={blackRepertoires}
-                  repertoireCounts={repertoireCounts}
-                  onOpen={(id) => {
-                    setActiveRepertoireId(id)
-                    setMode('build')
-                    setView('session')
-                  }}
-                  onExportPgn={handleExportPgn}
-                  onShare={(id, title) => setShareTarget({ id, title })}
-                  onRename={(r) => setRenameTarget(r)}
-                  onDelete={(r) => setModal({ kind: 'confirmDeleteRepertoire', repertoire: r })}
-                />
+                <h1 className="text-2xl font-semibold tracking-tight text-[var(--text-h)]">Opening Island</h1>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-3">
+                <button type="button" className="counter mb-0 text-sm" onClick={() => setImportOpen(true)}>
+                  Importer un répertoire
+                </button>
+                <button type="button" className="counter mb-0 text-sm" onClick={() => setCreateRepertoireOpen(true)}>
+                  Créer un répertoire
+                </button>
               </div>
             </div>
+            <UserProfileChrome placement="inline" />
+          </div>
 
-            <div className="rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-4 shadow-[var(--shadow)]">
-              <CreateRepertoireForm
-                onCreate={async (title, side) => {
-                  await handleCreate(title, side)
+          <div className="mt-6 rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-4 shadow-[var(--shadow)]">
+            <div className="space-y-5">
+              <HomeSection
+                title="Blanc"
+                sectionColorDot="white"
+                repertoires={whiteRepertoires}
+                repertoireCounts={repertoireCounts}
+                onOpen={(id) => {
+                  setActiveRepertoireId(id)
                   setMode('build')
                   setView('session')
                 }}
-                disabled={busy}
+                onExportPgn={handleExportPgn}
+                onShare={(id, title) => setShareTarget({ id, title })}
+                onRename={(r) => setRenameTarget(r)}
+                onDelete={(r) => setModal({ kind: 'confirmDeleteRepertoire', repertoire: r })}
+              />
+              <HomeSection
+                title="Noir"
+                sectionColorDot="black"
+                repertoires={blackRepertoires}
+                repertoireCounts={repertoireCounts}
+                onOpen={(id) => {
+                  setActiveRepertoireId(id)
+                  setMode('build')
+                  setView('session')
+                }}
+                onExportPgn={handleExportPgn}
+                onShare={(id, title) => setShareTarget({ id, title })}
+                onRename={(r) => setRenameTarget(r)}
+                onDelete={(r) => setModal({ kind: 'confirmDeleteRepertoire', repertoire: r })}
               />
             </div>
           </div>
         </div>
       ) : (
-        mode === 'train' ? (
+        <>
+          <div className="mx-auto flex w-full max-w-[1126px] justify-end">
+            <UserProfileChrome placement="inline" />
+          </div>
+          {mode === 'train' ? (
           <div className="mx-auto w-full max-w-[420px]">
             <div className="rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-2.5 shadow-[var(--shadow)] sm:p-3">
               <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
@@ -1509,12 +1522,24 @@ export function BuildMode() {
           <div className="mx-auto grid w-full max-w-[1126px] grid-cols-1 gap-6 lg:grid-cols-[340px_1fr]">
             <aside className="rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-4 shadow-[var(--shadow)]">
               <div className="flex items-start justify-between gap-3">
-                <div>
-                  <div className="text-sm font-medium text-[var(--text-h)]">Répertoire</div>
-                  <div className="text-sm">{activeRepertoire?.title ?? '—'}</div>
-                  <div className="mt-1 text-xs opacity-80">{activeRepertoire?.side ?? '—'}</div>
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="truncate text-sm font-medium text-black dark:text-neutral-100">
+                    {activeRepertoire?.title ?? '—'}
+                  </span>
+                  {activeRepertoire?.side ? (
+                    <span
+                      className={[
+                        'h-2.5 w-2.5 shrink-0 rounded-full border',
+                        activeRepertoire.side === 'white'
+                          ? 'border-neutral-400 bg-white shadow-sm'
+                          : 'border-neutral-800 bg-neutral-900 dark:border-neutral-600 dark:bg-neutral-950',
+                      ].join(' ')}
+                      title={activeRepertoire.side === 'white' ? 'Blancs' : 'Noirs'}
+                      aria-label={activeRepertoire.side === 'white' ? 'Blancs' : 'Noirs'}
+                    />
+                  ) : null}
                 </div>
-                <div className="flex gap-2">
+                <div className="flex shrink-0 gap-2">
                   <button
                     type="button"
                     className="counter"
@@ -1553,30 +1578,6 @@ export function BuildMode() {
                   </button>
                 </div>
               ) : null}
-
-              <div className="mt-4">
-                <label className="block text-sm font-medium text-[var(--text-h)]" htmlFor="repSelect">
-                  Répertoire
-                </label>
-                <select
-                  id="repSelect"
-                  className="mt-2 w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2"
-                  value={activeRepertoireId ?? ''}
-                  onChange={(e) => {
-                    const v = e.target.value
-                    setActiveRepertoireId(v === '' ? null : v)
-                  }}
-                >
-                  <option value="" disabled>
-                    —
-                  </option>
-                  {repertoires.map((r) => (
-                    <option key={r.id} value={r.id}>
-                      {r.title} ({r.side})
-                    </option>
-                  ))}
-                </select>
-              </div>
 
               <div className="mt-4">
                 <MoveTreeView
@@ -1699,12 +1700,12 @@ export function BuildMode() {
 
             <main className="rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-4 shadow-[var(--shadow)]">
               <div className="mx-auto w-full max-w-[420px]">
-                <div className="mb-3 flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-1.5">
+                <div className="mb-3 flex h-8 items-center justify-between gap-2">
+                  <div className="flex h-8 items-center gap-1.5">
                     <button
                       type="button"
                       className={[
-                        'h-3.5 w-3.5 flex-shrink-0 rounded-full shadow-sm transition-transform active:scale-90',
+                        'inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full shadow-sm transition-transform active:scale-90',
                         annotationBrush === 'red'
                           ? 'bg-red-600 hover:bg-red-500'
                           : annotationBrush === 'blue'
@@ -1751,7 +1752,7 @@ export function BuildMode() {
                       <Circle className="h-3 w-3" strokeWidth={2.25} aria-hidden />
                     </button>
                   </div>
-                  <div className="flex shrink-0 items-center gap-1">
+                  <div className="flex h-8 shrink-0 items-center gap-1">
                     <button
                       type="button"
                       className={[
@@ -1767,7 +1768,7 @@ export function BuildMode() {
                     </button>
                     <button
                       type="button"
-                      className="counter flex-shrink-0 !px-2 !py-1 text-sm"
+                      className="counter inline-flex h-7 w-7 flex-shrink-0 items-center justify-center !p-0 text-sm"
                       aria-label="Paramètres de l'échiquier"
                       title="Paramètres"
                       onClick={() => setSettingsOpen(true)}
@@ -1825,7 +1826,8 @@ export function BuildMode() {
               </div>
             </main>
           </div>
-        )
+          )}
+        </>
       )}
 
       {modal?.kind === 'trainStart' ? (
@@ -2202,6 +2204,16 @@ export function BuildMode() {
         />
       ) : null}
 
+      <CreateRepertoireModal
+        open={createRepertoireOpen}
+        busy={busy}
+        onClose={() => setCreateRepertoireOpen(false)}
+        onSubmit={async (title, side) => {
+          const ok = await handleCreate(title, side)
+          if (ok) setView('session')
+          return ok
+        }}
+      />
       <ImportRepertoireModal
         open={importOpen}
         onClose={() => setImportOpen(false)}
@@ -2254,7 +2266,7 @@ function ModalFrame({
           </button>
         </div>
         <div className="mt-3">{children}</div>
-        <div className="mt-4 flex justify-end">{actions}</div>
+        <div className="mt-4 flex justify-end gap-4">{actions}</div>
       </div>
     </div>
   )
@@ -2368,6 +2380,7 @@ function ToggleRow({
 
 function HomeSection({
   title,
+  sectionColorDot,
   repertoires,
   repertoireCounts,
   onOpen,
@@ -2377,6 +2390,7 @@ function HomeSection({
   onDelete,
 }: {
   title: string
+  sectionColorDot: 'white' | 'black'
   repertoires: Repertoire[]
   repertoireCounts: RepertoireCounts
   onOpen: (id: string) => void
@@ -2387,7 +2401,18 @@ function HomeSection({
 }) {
   return (
     <section>
-      <div className="text-sm font-medium text-[var(--text-h)]">{title}</div>
+      <div className="flex items-center gap-2 text-sm font-medium text-[var(--text-h)]">
+        <span
+          className={[
+            'h-2 w-2 shrink-0 rounded-full border',
+            sectionColorDot === 'white'
+              ? 'border-neutral-400 bg-white shadow-sm'
+              : 'border-neutral-800 bg-neutral-900 dark:border-neutral-600 dark:bg-neutral-950',
+          ].join(' ')}
+          aria-hidden
+        />
+        <span>{title}</span>
+      </div>
       <div className="mt-3 space-y-2">
         {repertoires.length === 0 ? (
           <div className="text-sm opacity-80">Aucun répertoire.</div>
@@ -2475,59 +2500,105 @@ function HomeSection({
   )
 }
 
-function CreateRepertoireForm({
-  onCreate,
-  disabled,
+function CreateRepertoireModal({
+  open,
+  busy,
+  onClose,
+  onSubmit,
 }: {
-  onCreate: (title: string, side: Side) => Promise<void>
-  disabled?: boolean
+  open: boolean
+  busy: boolean
+  onClose: () => void
+  onSubmit: (title: string, side: Side) => Promise<boolean>
 }) {
   const [title, setTitle] = useState('')
   const [side, setSide] = useState<Side>('white')
 
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    const t = title.trim()
-    if (!t) return
-    await onCreate(t, side)
+  useEffect(() => {
+    if (!open) return
     setTitle('')
-  }
+    setSide('white')
+  }, [open])
+
+  if (!open) return null
 
   return (
-    <form className="mt-6 border-t border-[var(--border)] pt-4 text-[var(--text-h)]" onSubmit={submit}>
-      <div className="text-sm font-medium text-[var(--text-h)]">Nouveau répertoire</div>
-
-      <label className="mt-3 block text-sm font-medium text-[var(--text-h)]" htmlFor="newTitle">
-        Nom
-      </label>
-      <input
-        id="newTitle"
-        className="mt-2 w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2"
-        value={title}
-        onChange={(e) => setTitle(e.target.value)}
-        placeholder="E4 White Repertoire"
-        maxLength={80}
-        disabled={disabled}
-      />
-
-      <label className="mt-3 block text-sm font-medium text-[var(--text-h)]" htmlFor="newSide">
-        Je joue
-      </label>
-      <select
-        id="newSide"
-        className="mt-2 w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2"
-        value={side}
-        onChange={(e) => setSide(e.target.value as Side)}
-        disabled={disabled}
-      >
-        <option value="white">Blancs</option>
-        <option value="black">Noirs</option>
-      </select>
-
-      <button type="submit" className="counter mt-4 w-full" disabled={disabled || !title.trim()}>
-        Créer
-      </button>
-    </form>
+    <ModalFrame
+      title="Créer un répertoire"
+      onClose={() => {
+        if (!busy) onClose()
+      }}
+      actions={
+        <>
+          <button type="button" className="counter" disabled={busy} onClick={onClose}>
+            Annuler
+          </button>
+          <button
+            type="button"
+            className="counter"
+            disabled={busy || !title.trim()}
+            onClick={() => {
+              void (async () => {
+                const ok = await onSubmit(title.trim(), side)
+                if (ok) onClose()
+              })()
+            }}
+          >
+            Créer
+          </button>
+        </>
+      }
+    >
+      <div className="space-y-3 text-left text-sm text-[var(--text-h)]">
+        <div>
+          <label className="block text-xs font-medium opacity-90" htmlFor="create-rep-title">
+            Titre
+          </label>
+          <input
+            id="create-rep-title"
+            className="mt-1.5 w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="Mon ouverture…"
+            maxLength={80}
+            disabled={busy}
+            autoFocus
+          />
+        </div>
+        <div>
+          <span className="block text-xs font-medium opacity-90">Couleur du répertoire</span>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              className={[
+                'counter flex items-center gap-2 !py-2',
+                side === 'white' ? 'border-[var(--accent)] bg-[var(--accent-bg)]' : '',
+              ].join(' ')}
+              disabled={busy}
+              onClick={() => setSide('white')}
+            >
+              <span className="h-2.5 w-2.5 rounded-full border border-neutral-400 bg-white shadow-sm" aria-hidden />
+              Blancs
+            </button>
+            <button
+              type="button"
+              className={[
+                'counter flex items-center gap-2 !py-2',
+                side === 'black' ? 'border-[var(--accent)] bg-[var(--accent-bg)]' : '',
+              ].join(' ')}
+              disabled={busy}
+              onClick={() => setSide('black')}
+            >
+              <span
+                className="h-2.5 w-2.5 rounded-full border border-neutral-800 bg-neutral-900 dark:border-neutral-600 dark:bg-neutral-950"
+                aria-hidden
+              />
+              Noirs
+            </button>
+          </div>
+        </div>
+      </div>
+    </ModalFrame>
   )
 }
 
