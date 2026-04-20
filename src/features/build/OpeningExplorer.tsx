@@ -266,10 +266,10 @@ export function OpeningExplorer({
     <div className="mt-4 rounded-md border border-[var(--border)] bg-[var(--bg)] p-3 text-left text-sm">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <div className="flex w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
             <button
               type="button"
-              className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--text-h)] hover:underline"
+              className="inline-flex min-w-0 items-center gap-1.5 text-xs font-medium text-[var(--text-h)] hover:underline"
               onClick={onToggleCollapsed}
               aria-expanded={!collapsed}
               title={collapsed ? 'Déplier' : 'Replier'}
@@ -277,8 +277,10 @@ export function OpeningExplorer({
               <span aria-hidden>{collapsed ? '▸' : '▾'}</span>
               <span>Arbre d’ouverture</span>
             </button>
-            <span className="select-none text-[10px] font-normal uppercase tracking-wide opacity-45">Lichess</span>
-            <div className="relative shrink-0" ref={eloOptionsRef}>
+            <span className="select-none text-[10px] font-normal uppercase tracking-wide opacity-45">
+              Lichess
+            </span>
+            <div className="relative ml-auto shrink-0" ref={eloOptionsRef}>
               <button
                 type="button"
                 className={[
@@ -293,9 +295,9 @@ export function OpeningExplorer({
                 <SlidersHorizontal className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
               </button>
               {eloOptionsOpen ? (
-                <div className="absolute left-0 top-full z-[70] mt-1 w-[min(calc(100vw-2rem),18rem)] rounded-md border border-[var(--border)] bg-[var(--social-bg)] p-3 text-left shadow-lg sm:left-auto sm:right-0">
-                  <div className="text-xs font-medium text-[var(--text-h)]">ELO (tranches)</div>
-                  <p className="mt-1 text-[10px] leading-snug opacity-70">
+                <div className="absolute right-0 top-full z-[70] mt-1 w-[min(calc(100vw-2rem),18rem)] rounded-md border border-neutral-200 bg-white p-3 text-left text-neutral-900 shadow-lg">
+                  <div className="text-xs font-medium">ELO (tranches)</div>
+                  <p className="mt-1 text-[10px] leading-snug text-neutral-600">
                     Clique pour activer / désactiver (au moins une tranche).
                   </p>
                   <div className="mt-2 flex flex-wrap gap-2">
@@ -309,7 +311,7 @@ export function OpeningExplorer({
                             'rounded-md border px-2 py-1 font-mono text-xs transition-colors',
                             on
                               ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
-                              : 'border-[var(--border)] bg-[var(--code-bg)] text-[var(--text-h)] opacity-70 hover:opacity-100',
+                              : 'border-neutral-200 bg-neutral-100 text-neutral-800 opacity-90 hover:opacity-100',
                           ].join(' ')}
                           aria-pressed={on}
                           onClick={() => toggleBand(i)}

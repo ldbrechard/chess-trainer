@@ -1,3 +1,4 @@
+import { deleteFsrsCardsForRepertoire } from './fsrsRepo'
 import {
   scheduleRepertoireSync,
   tryRemoteDeleteRepertoire,
@@ -111,6 +112,7 @@ export async function deleteRepertoire(id: string): Promise<void> {
   if (!existing) return
   await db.moves.where('repertoireId').equals(id).delete()
   await db.trainRuns.where('repertoireId').equals(id).delete()
+  await deleteFsrsCardsForRepertoire(id)
   await db.pendingDeleteSubtrees.where('repertoireId').equals(id).delete()
   await db.repertoires.delete(id)
   void tryRemoteDeleteRepertoire(id)

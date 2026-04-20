@@ -30,6 +30,8 @@ type Props = {
   onAnnotateStart?: (square: Key) => void
   onAnnotateMove?: (square: Key | null) => void
   onAnnotateEnd?: (square: Key | null) => void
+  /** Mobile : désactive le drag des pièces (sélection + case de destination, plus fluide au doigt). */
+  touchMoveMode?: boolean
 }
 
 export function Board({
@@ -51,6 +53,7 @@ export function Board({
   onAnnotateStart,
   onAnnotateMove,
   onAnnotateEnd,
+  touchMoveMode = false,
 }: Props) {
   const cgRef = useRef<HTMLDivElement | null>(null)
   const apiRef = useRef<Api | null>(null)
@@ -152,6 +155,7 @@ export function Board({
     const api = Chessground(el, {
       orientation,
       coordinates: true,
+      blockTouchScroll: touchMoveMode,
       turnColor: turnColorRef.current,
       movable: {
         free: false,
@@ -170,6 +174,13 @@ export function Board({
           },
         },
       },
+      draggable: {
+        enabled: !touchMoveMode,
+        showGhost: !touchMoveMode,
+        distance: 3,
+        autoDistance: true,
+        deleteOnDropOff: false,
+      },
       lastMove: lastMove ?? undefined,
       selected: selectedSquare ?? undefined,
       drawable: drawableCfg,
@@ -183,7 +194,7 @@ export function Board({
     }
     // Intentionally omit lastMove / selectedSquare / shapes: they are applied in the update effect below.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- avoid destroying the instance on every draw/highlight
-  }, [orientation, drawableEnabled, drawableVisible, showDests])
+  }, [orientation, drawableEnabled, drawableVisible, showDests, touchMoveMode])
 
   useEffect(() => {
     apiRef.current?.set({
@@ -192,6 +203,14 @@ export function Board({
       selected: selectedSquare ?? undefined,
       turnColor,
       movable: { color: turnColor, dests, showDests },
+      draggable: {
+        enabled: !touchMoveMode,
+        showGhost: !touchMoveMode,
+        distance: 3,
+        autoDistance: true,
+        deleteOnDropOff: false,
+      },
+      blockTouchScroll: touchMoveMode,
       drawable: { enabled: drawableEnabled, visible: drawableVisible, shapes, autoShapes: annotationAutoShapes },
     })
   }, [
@@ -204,6 +223,7 @@ export function Board({
     selectedSquare,
     shapes,
     showDests,
+    touchMoveMode,
     turnColor,
   ])
 

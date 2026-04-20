@@ -10,6 +10,25 @@ export type Repertoire = {
   title: string
   side: Side
   createdAt: number
+  /** Jours consécutifs avec au moins un entraînement terminé (local). */
+  trainStreak?: number
+}
+
+/** Stockage FSRS par position (parentId = case où c’est à nous de jouer ; racine = `__root__`). */
+export type StoredFsrsCard = {
+  id: string
+  repertoireId: RepertoireId
+  parentPositionKey: string
+  due: number
+  stability: number
+  difficulty: number
+  scheduled_days: number
+  elapsed_days: number
+  reps: number
+  lapses: number
+  state: number
+  learning_steps: number
+  last_review?: number
 }
 
 export type Move = {
@@ -35,6 +54,9 @@ export type Move = {
 export type StoredRepertoire = Repertoire & {
   updatedAt: number
   dirty: boolean
+  /** Premier jour où une file FSRS a été utilisée (YYYY-MM-DD). */
+  fsrsFirstDayKey?: string
+  lastTrainDayKey?: string
 }
 
 export type StoredMove = Move & {
@@ -49,7 +71,7 @@ export type PendingDeleteSubtreeOp = {
   createdAt: number
 }
 
-export type TrainRunKindStored = 'full' | 'selection' | 'failed' | 'random'
+export type TrainRunKindStored = 'full' | 'selection' | 'failed' | 'random' | 'fsrs'
 
 export type TrainRunRecord = {
   id: string
@@ -72,6 +94,7 @@ export class ChessTrainerDB extends Dexie {
   pendingDeleteSubtrees!: Table<PendingDeleteSubtreeOp, number>
   trainRuns!: Table<TrainRunRecord, string>
   trainActivityDays!: Table<TrainActivityDay, string>
+  fsrsCards!: Table<StoredFsrsCard, string>
 
   constructor() {
     super('ChessTrainerSyncDB')
@@ -97,13 +120,28 @@ export class ChessTrainerDB extends Dexie {
       trainRuns: 'id, repertoireId, endedAt, dayKey',
       trainActivityDays: '&dayKey',
     })
+
+    this.version(4).stores({
+      repertoires: 'id, side, createdAt, dirty',
+      moves: 'id, repertoireId, parentId, [repertoireId+parentId], [repertoireId+fen], dirty',
+      pendingDeleteSubtrees: '++id, repertoireId',
+      trainRuns: 'id, repertoireId, endedAt, dayKey',
+      trainActivityDays: '&dayKey',
+      fsrsCards: 'id, repertoireId, parentPositionKey, [repertoireId+parentPositionKey], due',
+    })
   }
 }
 
 export const db = new ChessTrainerDB()
 
 export function toPublicRepertoire(r: StoredRepertoire): Repertoire {
-  return { id: r.id, title: r.title, side: r.side, createdAt: r.createdAt }
+  return {
+    id: r.id,
+    title: r.title,
+    side: r.side,
+    createdAt: r.createdAt,
+    trainStreak: r.trainStreak,
+  }
 }
 
 export function toPublicMove(m: StoredMove): Move {

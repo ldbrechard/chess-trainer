@@ -1,5 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowUpRight, Brain, Circle, Download, Pencil, Share2, Trash2 } from 'lucide-react'
+import {
+  ArrowUpRight,
+  Brain,
+  Check,
+  Circle,
+  Download,
+  Eye,
+  Flame,
+  LayoutGrid,
+  ListTree,
+  Pencil,
+  Settings,
+  Share2,
+  SkipForward,
+  Trash2,
+  X,
+} from 'lucide-react'
 import { Chess } from 'chess.js'
 import type { Key } from 'chessground/types'
 import type { DrawShape } from 'chessground/draw'
@@ -23,19 +39,33 @@ import {
   updateMove,
   updateRepertoireTitle,
 } from '../../db/repertoireRepo'
+import { buildFsrsTrainQueue, recordPositionFsrsReview } from '../../db/fsrsRepo'
 import { insertTrainRun, touchTrainActivityDay } from '../../db/trainStatsRepo'
 import { exportRepertoireToPgn } from '../../lib/pgnImportExport'
+import { normalizeToUsefulPuzzleTag } from '../../lib/puzzleOpeningTags'
+import { doesAnyPuzzleExistForOpeningTag, fetchPuzzlesByOpeningTags } from '../../lib/puzzleRepo'
+import {
+  areUciMovesEquivalent,
+  openingNameToCanonicalTag,
+  playUci,
+  preparePuzzle,
+  type PuzzleDifficulty,
+  type PuzzlePrepared,
+  uciToMoveKeys,
+  uciFromBoardMove,
+} from '../../lib/puzzleUtils'
 import type { EngineEval } from '../../lib/stockfishClient'
 import { formatEval, StockfishBrowserEngine } from '../../lib/stockfishClient'
 import { ImportRepertoireModal } from '../repertoire/ImportRepertoireModal'
 import { ShareRepertoireModal } from '../repertoire/ShareRepertoireModal'
 import { MoveTreeView, formatMoveWithNag, moveNumberPrefix } from './MoveTreeView'
 import openingIslandIcon from '../../assets/icon.png'
+import { useDevice } from '../../hooks/useDevice'
 import { OpeningExplorer } from './OpeningExplorer'
 
 type Toast = { type: 'info' | 'error'; message: string } | null
-type Mode = 'build' | 'train'
-type TrainRunKind = 'full' | 'selection' | 'failed' | 'random'
+type Mode = 'build' | 'train' | 'puzzle'
+type TrainRunKind = 'full' | 'selection' | 'failed' | 'random' | 'fsrs'
 type Modal =
   | {
       kind: 'trainStart'
@@ -56,6 +86,10 @@ type Modal =
       failed: number
       failedPositions: Array<string | null>
     }
+  | {
+      kind: 'puzzleStart'
+      hasSelection: boolean
+    }
   | { kind: 'confirmDeleteMove'; move: Move }
   | { kind: 'confirmDeleteRepertoire'; repertoire: Repertoire }
   | null
@@ -75,6 +109,37 @@ function sleep(ms: number) {
   return new Promise<void>((resolve) => {
     window.setTimeout(resolve, ms)
   })
+}
+
+function formatDurationMs(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000))
+  const mm = Math.floor(s / 60)
+  const ss = s % 60
+  return `${mm}:${String(ss).padStart(2, '0')}`
+}
+
+const PLAYED_PUZZLE_IDS_STORAGE_KEY = 'chess-trainer:puzzle-played-ids:v1'
+
+function readPlayedPuzzleIds(): Set<string> {
+  try {
+    const raw = window.localStorage.getItem(PLAYED_PUZZLE_IDS_STORAGE_KEY)
+    if (!raw) return new Set<string>()
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return new Set<string>()
+    return new Set(parsed.filter((x) => typeof x === 'string' && x.length > 0))
+  } catch {
+    return new Set<string>()
+  }
+}
+
+function persistPlayedPuzzleIds(ids: Set<string>) {
+  try {
+    // Keep a bounded history to avoid unbounded storage growth.
+    const arr = [...ids].slice(-20000)
+    window.localStorage.setItem(PLAYED_PUZZLE_IDS_STORAGE_KEY, JSON.stringify(arr))
+  } catch {
+    // ignore storage errors
+  }
 }
 
 /** Chessground must revert the drag if the move is not applied (see Board `after`). */
@@ -98,7 +163,11 @@ function expectedTrainReplies(children: Move[], mainLineOnly: boolean): Move[] {
   return children
 }
 
+type MobileBuildTab = 'tree' | 'board'
+
 export function BuildMode() {
+  const device = useDevice()
+  const [mobileBuildTab, setMobileBuildTab] = useState<MobileBuildTab>('board')
   const [view, setView] = useState<View>('home')
   const [importOpen, setImportOpen] = useState(false)
   const [createRepertoireOpen, setCreateRepertoireOpen] = useState(false)
@@ -145,6 +214,7 @@ export function BuildMode() {
     return eng.analyzeFen(fen, { depth: 10, movetimeMs: 300 })
   }, [])
   const [modal, setModal] = useState<Modal>(null)
+  const [fsrsQueuePreviewCount, setFsrsQueuePreviewCount] = useState<number | null>(null)
 
   const [trainRunActive, setTrainRunActive] = useState(false)
   const [trainRunSuspended, setTrainRunSuspended] = useState(false)
@@ -166,6 +236,23 @@ export function BuildMode() {
   const [trainMainLineOnly, setTrainMainLineOnly] = useState(true)
   const [trainFoundAnswerIds, setTrainFoundAnswerIds] = useState<string[]>([])
   const [trainGreyAutoShapes, setTrainGreyAutoShapes] = useState<DrawShape[]>([])
+  const [puzzleDifficulty, setPuzzleDifficulty] = useState<PuzzleDifficulty>('medium')
+  const [puzzleQueue, setPuzzleQueue] = useState<PuzzlePrepared[]>([])
+  const [puzzleIndex, setPuzzleIndex] = useState(0)
+  const [puzzleFen, setPuzzleFen] = useState<string | null>(null)
+  const [puzzleStep, setPuzzleStep] = useState(0)
+  const [puzzleResultsByIndex, setPuzzleResultsByIndex] = useState<Record<number, 'pass' | 'fail'>>({})
+  const [puzzleFrontierIndex, setPuzzleFrontierIndex] = useState(0)
+  const [puzzleFeedback, setPuzzleFeedback] = useState<'pass' | 'fail' | null>(null)
+  const [puzzleOpeningTags, setPuzzleOpeningTags] = useState<string[]>([])
+  const [puzzleStartTagsDraft, setPuzzleStartTagsDraft] = useState<string[]>([])
+  const [puzzleLoading, setPuzzleLoading] = useState(false)
+  const [puzzleShowHint, setPuzzleShowHint] = useState(false)
+  const [puzzleStartedAtMs, setPuzzleStartedAtMs] = useState<number | null>(null)
+  const [puzzleDurationsMs, setPuzzleDurationsMs] = useState<number[]>([])
+  const [playedPuzzleIds, setPlayedPuzzleIds] = useState<Set<string>>(() => readPlayedPuzzleIds())
+  const openingNameCacheRef = useRef<Map<string, string | null>>(new Map())
+  const usefulTagExistenceCacheRef = useRef<Map<string, boolean>>(new Map())
 
   const trainMovesPlayedRef = useRef(0)
   const trainSessionNonceRef = useRef(0)
@@ -287,6 +374,42 @@ export function BuildMode() {
       : 'white'
   const boardDests = showDests ? dests : new Map<Key, Key[]>()
   const currentShapes = shapesByFen[currentFen] ?? []
+  const puzzleChess = useMemo(() => {
+    if (!puzzleFen) return null
+    const c = new Chess()
+    try {
+      c.load(puzzleFen)
+      return c
+    } catch {
+      return null
+    }
+  }, [puzzleFen])
+  const puzzleTurnColor = puzzleChess?.turn() === 'w' ? 'white' : 'black'
+  const puzzleDests = useMemo(() => {
+    if (!puzzleChess) return new Map<Key, Key[]>()
+    return computeDests(puzzleChess)
+  }, [puzzleChess])
+  const activePuzzle = puzzleQueue[puzzleIndex] ?? null
+  const puzzleResultEntries = useMemo(
+    () =>
+      Object.entries(puzzleResultsByIndex)
+        .map(([k, result]) => ({ puzzleIndex: Number(k), result }))
+        .filter((x) => Number.isFinite(x.puzzleIndex))
+        .sort((a, b) => a.puzzleIndex - b.puzzleIndex),
+    [puzzleResultsByIndex],
+  )
+  const puzzleHintShape = useMemo((): DrawShape[] => {
+    if (!puzzleShowHint || !activePuzzle) return []
+    const next = activePuzzle.solutionUci[puzzleStep]
+    if (!next) return []
+    const keys = uciToMoveKeys(next)
+    if (!keys) return []
+    return [{ orig: keys.from, dest: keys.to, brush: 'green' as DrawShape['brush'] }]
+  }, [activePuzzle, puzzleShowHint, puzzleStep])
+  const puzzleAverageMs = useMemo(() => {
+    if (puzzleDurationsMs.length === 0) return 0
+    return Math.round(puzzleDurationsMs.reduce((sum, x) => sum + x, 0) / puzzleDurationsMs.length)
+  }, [puzzleDurationsMs])
 
   const annotationPreviewAutoShapes = useMemo((): DrawShape[] => {
     if (annotationTool !== 'arrow') return []
@@ -390,6 +513,29 @@ export function BuildMode() {
       setToast(null)
     }
   }, [mode])
+
+  useEffect(() => {
+    if (!device.isMobile) setMobileBuildTab('board')
+  }, [device.isMobile])
+
+  useEffect(() => {
+    if (device.isMobile && view === 'session' && mode === 'build') setMobileBuildTab('board')
+  }, [activeRepertoireId, device.isMobile, mode, view])
+
+  useEffect(() => {
+    if (modal?.kind !== 'trainStart' || !activeRepertoireId) {
+      setFsrsQueuePreviewCount(null)
+      return
+    }
+    let cancelled = false
+    setFsrsQueuePreviewCount(null)
+    void buildFsrsTrainQueue(activeRepertoireId, trainPositions).then((q) => {
+      if (!cancelled) setFsrsQueuePreviewCount(q.length)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [modal, activeRepertoireId, trainPositions])
 
   useEffect(() => {
     if (!engineBuildOn || mode !== 'build') {
@@ -673,6 +819,365 @@ export function BuildMode() {
     [currentNodeId, selectionTrainPositions, startTrainRun, trainPositions],
   )
 
+  const loadOpeningNameForFen = useCallback(async (fen: string): Promise<string | null> => {
+    const cached = openingNameCacheRef.current.get(fen)
+    if (cached !== undefined) return cached
+
+    const token = (import.meta.env.VITE_LICHESS_TOKEN as string | undefined | null)?.trim() ?? ''
+    if (!token) {
+      openingNameCacheRef.current.set(fen, null)
+      return null
+    }
+
+    try {
+      const url = new URL('https://explorer.lichess.ovh/lichess')
+      url.searchParams.set('fen', fen)
+      url.searchParams.set('variant', 'chess')
+      url.searchParams.set('moves', '0')
+      const res = await fetch(url.toString(), {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+      })
+      if (!res.ok) {
+        openingNameCacheRef.current.set(fen, null)
+        return null
+      }
+      const json = (await res.json()) as { opening?: { name?: string } | null }
+      const name = json.opening?.name?.trim() ?? null
+      openingNameCacheRef.current.set(fen, name)
+      return name
+    } catch {
+      openingNameCacheRef.current.set(fen, null)
+      return null
+    }
+  }, [])
+
+  const resolveUsefulPuzzleTag = useCallback(async (canonicalTag: string): Promise<string | null> => {
+    const direct = normalizeToUsefulPuzzleTag(canonicalTag)
+    if (direct) return direct
+
+    let cur = canonicalTag.trim()
+    while (cur.length > 0) {
+      const cached = usefulTagExistenceCacheRef.current.get(cur)
+      if (cached === true) return cur
+      if (cached === undefined) {
+        const exists = await doesAnyPuzzleExistForOpeningTag(cur)
+        usefulTagExistenceCacheRef.current.set(cur, exists)
+        if (exists) return cur
+      }
+      const i = cur.lastIndexOf('_')
+      if (i === -1) break
+      cur = cur.slice(0, i)
+    }
+    return null
+  }, [])
+
+  const openingTagsForSelectedVariant = useCallback(async (): Promise<string[]> => {
+    const byId = new Map<string, Move>()
+    const childrenByParent = new Map<string | null, Move[]>()
+    for (const m of allMoves) {
+      byId.set(m.id, m)
+      const k = m.parentId ?? null
+      const list = childrenByParent.get(k)
+      if (list) list.push(m)
+      else childrenByParent.set(k, [m])
+    }
+
+    const fenForPosition = (positionId: string | null): string | null => {
+      if (positionId == null) return new Chess().fen()
+      return byId.get(positionId)?.fen ?? null
+    }
+    const parentPositionId = (positionId: string | null): string | null => {
+      if (positionId == null) return null
+      return byId.get(positionId)?.parentId ?? null
+    }
+
+    const openingTagForPosition = async (positionId: string | null): Promise<string | null> => {
+      const fen = fenForPosition(positionId)
+      if (!fen) return null
+      const name = await loadOpeningNameForFen(fen)
+      if (!name) return null
+      const canonical = openingNameToCanonicalTag(name)
+      if (!canonical) return null
+      return resolveUsefulPuzzleTag(canonical)
+    }
+
+    const selectedPositionId = currentNodeId ?? null
+    const selectedTag = await openingTagForPosition(selectedPositionId)
+
+    // 1) No direct opening tag at current position -> walk up until first known tag.
+    if (!selectedTag) {
+      let cursor = parentPositionId(selectedPositionId)
+      while (cursor !== null) {
+        const t = await openingTagForPosition(cursor)
+        if (t) return [t]
+        cursor = parentPositionId(cursor)
+      }
+      const rootTag = await openingTagForPosition(null)
+      return rootTag ? [rootTag] : []
+    }
+
+    // 2) Current position has an opening tag -> descend each sub-variation and keep all useful tags encountered.
+    const out = new Set<string>()
+    const maxVisited = 120
+    let visited = 0
+
+    out.add(selectedTag)
+    const walk = async (positionId: string | null) => {
+      if (visited >= maxVisited) return
+      visited += 1
+      const kids = childrenByParent.get(positionId) ?? []
+      if (kids.length === 0) return
+
+      await Promise.all(
+        kids.map(async (k) => {
+          const tag = await openingTagForPosition(k.id)
+          // Branch stops when there is no longer a known opening tag.
+          if (!tag) return
+          out.add(tag)
+          await walk(k.id)
+        }),
+      )
+    }
+
+    await walk(selectedPositionId)
+    return [...out]
+  }, [allMoves, currentNodeId, loadOpeningNameForFen, resolveUsefulPuzzleTag])
+
+  const activatePuzzleAtIndex = useCallback(
+    (index: number, queueArg?: PuzzlePrepared[]) => {
+      const queue = queueArg ?? puzzleQueue
+      const p = queue[index]
+      if (!p) {
+        setPuzzleFen(null)
+        return false
+      }
+      setPuzzleIndex(index)
+      setPuzzleFen(p.presentedFen)
+      setPuzzleStep(0)
+      setPuzzleFeedback(null)
+      setPuzzleShowHint(false)
+      setPuzzleStartedAtMs(Date.now())
+      return true
+    },
+    [puzzleQueue],
+  )
+
+  const loadPuzzleQueue = useCallback(
+    async (options: { openingTags: string[]; difficulty?: PuzzleDifficulty }) => {
+      const difficulty = options.difficulty ?? puzzleDifficulty
+      if (options.openingTags.length === 0) {
+        setToast({ type: 'info', message: 'Aucune ouverture exploitable pour les puzzles.' })
+        return
+      }
+      setPuzzleLoading(true)
+      try {
+        const rows = await fetchPuzzlesByOpeningTags({
+          openingTags: options.openingTags,
+          difficulty,
+          perTagLimit: 50,
+          totalLimit: 32,
+        })
+        const sideToPlay = activeRepertoire?.side === 'white' ? 'w' : 'b'
+        const allPrepared = rows
+          .map((r) => preparePuzzle(r))
+          .filter(Boolean)
+          .filter((p) => p!.playerTurn === sideToPlay) as PuzzlePrepared[]
+        const unseenPrepared = allPrepared.filter((p) => !playedPuzzleIds.has(p.id))
+        const prepared = unseenPrepared.length > 0 ? unseenPrepared : allPrepared
+        if (prepared.length === 0) {
+          setToast({ type: 'info', message: 'Aucun puzzle trouvé pour ces critères.' })
+          return
+        }
+        setPuzzleQueue(prepared)
+        setPuzzleResultsByIndex({})
+        setPuzzleFrontierIndex(0)
+        setPuzzleDurationsMs([])
+        setPuzzleOpeningTags(options.openingTags)
+        setMode('puzzle')
+        setModal(null)
+        activatePuzzleAtIndex(0, prepared)
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        setToast({
+          type: 'error',
+          message: `Impossible de charger les puzzles (${msg}). Vérifie RLS/colonnes de puzzles_v2.`,
+        })
+      } finally {
+        setPuzzleLoading(false)
+      }
+    },
+    [activatePuzzleAtIndex, activeRepertoire?.side, playedPuzzleIds, puzzleDifficulty],
+  )
+
+  const markPuzzleAsPlayed = useCallback((puzzleId: string) => {
+    setPlayedPuzzleIds((prev) => {
+      if (prev.has(puzzleId)) return prev
+      const next = new Set(prev)
+      next.add(puzzleId)
+      persistPlayedPuzzleIds(next)
+      return next
+    })
+  }, [])
+
+  const setPuzzleResultSticky = useCallback((index: number, result: 'pass' | 'fail') => {
+    setPuzzleResultsByIndex((prev) => {
+      const existing = prev[index]
+      if (existing === 'fail') return prev
+      if (existing === result) return prev
+      return { ...prev, [index]: result }
+    })
+  }, [])
+
+  const advanceToNextPuzzle = useCallback(
+    (result: 'pass' | 'fail') => {
+      if (activePuzzle) markPuzzleAsPlayed(activePuzzle.id)
+      setPuzzleResultSticky(puzzleIndex, result)
+
+      const now = Date.now()
+      if (puzzleStartedAtMs != null) {
+        setPuzzleDurationsMs((prev) => [...prev, Math.max(0, now - puzzleStartedAtMs)])
+      }
+
+      const nextFrontier = Math.max(puzzleFrontierIndex, puzzleIndex + 1)
+      setPuzzleFrontierIndex(nextFrontier)
+      const targetIndex = puzzleIndex < puzzleFrontierIndex ? puzzleFrontierIndex : puzzleIndex + 1
+
+      window.setTimeout(() => {
+        if (!activatePuzzleAtIndex(targetIndex)) {
+          setToast({ type: 'info', message: 'Session puzzles terminée.' })
+          setMode('build')
+        }
+      }, 450)
+    },
+    [
+      activePuzzle,
+      activatePuzzleAtIndex,
+      markPuzzleAsPlayed,
+      puzzleFrontierIndex,
+      puzzleIndex,
+      puzzleStartedAtMs,
+      setPuzzleResultSticky,
+    ],
+  )
+
+  const onBoardMovePuzzle = useCallback(
+    async (from: Key, to: Key) => {
+      if (!activePuzzle || !puzzleFen) rejectBoardMove()
+      if (busy || boardInteractionInFlightRef.current) rejectBoardMove()
+      boardInteractionInFlightRef.current = true
+      try {
+        if (puzzleShowHint) setPuzzleShowHint(false)
+        const c = new Chess()
+        c.load(puzzleFen)
+
+        const move = c.move({ from, to, promotion: 'q' })
+        if (!move) rejectBoardMove()
+
+        const expected = activePuzzle.solutionUci[puzzleStep]
+        if (!expected) rejectBoardMove()
+        const attempted = uciFromBoardMove(from, to, move.promotion)
+        if (!areUciMovesEquivalent(expected, attempted)) {
+          if (activePuzzle) markPuzzleAsPlayed(activePuzzle.id)
+          setPuzzleResultSticky(puzzleIndex, 'fail')
+          setPuzzleFeedback('fail')
+          window.setTimeout(() => setPuzzleFeedback(null), 800)
+          rejectBoardMove()
+        }
+
+        setPuzzleFen(c.fen())
+        let nextStep = puzzleStep + 1
+        if (nextStep >= activePuzzle.solutionUci.length) {
+          setPuzzleFeedback('pass')
+          advanceToNextPuzzle('pass')
+          return
+        }
+
+        // Play engine/opponent response from puzzle line automatically.
+        const reply = activePuzzle.solutionUci[nextStep]
+        if (!reply) return
+        const replied = playUci(c, reply)
+        if (replied) {
+          setPuzzleFen(c.fen())
+          nextStep += 1
+          setPuzzleStep(nextStep)
+          if (nextStep >= activePuzzle.solutionUci.length) {
+            setPuzzleFeedback('pass')
+            advanceToNextPuzzle('pass')
+          }
+          return
+        }
+        setPuzzleStep(nextStep)
+      } finally {
+        boardInteractionInFlightRef.current = false
+      }
+    },
+    [
+      activePuzzle,
+      advanceToNextPuzzle,
+      busy,
+      markPuzzleAsPlayed,
+      puzzleFen,
+      puzzleIndex,
+      puzzleShowHint,
+      puzzleStep,
+      setPuzzleResultSticky,
+    ],
+  )
+
+  const showPuzzleSolution = useCallback(() => {
+    if (!activePuzzle) return
+    markPuzzleAsPlayed(activePuzzle.id)
+    setPuzzleResultSticky(puzzleIndex, 'fail')
+    setPuzzleShowHint(true)
+  }, [activePuzzle, markPuzzleAsPlayed, puzzleIndex, setPuzzleResultSticky])
+
+  const skipPuzzle = useCallback(() => {
+    if (!activePuzzle) return
+    advanceToNextPuzzle('fail')
+  }, [activePuzzle, advanceToNextPuzzle])
+
+  const jumpToPuzzleFromHistory = useCallback(
+    (targetIndex: number) => {
+      if (targetIndex < 0 || targetIndex >= puzzleQueue.length) return
+      activatePuzzleAtIndex(targetIndex)
+    },
+    [activatePuzzleAtIndex, puzzleQueue.length],
+  )
+
+  const reloadPuzzleQueueForDifficulty = useCallback(
+    (difficulty: PuzzleDifficulty) => {
+      setPuzzleDifficulty(difficulty)
+      if (puzzleOpeningTags.length === 0) return
+      void loadPuzzleQueue({ openingTags: puzzleOpeningTags, difficulty })
+    },
+    [loadPuzzleQueue, puzzleOpeningTags],
+  )
+
+  useEffect(() => {
+    if (modal?.kind !== 'puzzleStart') return
+    let cancelled = false
+    setPuzzleStartTagsDraft([])
+    setPuzzleLoading(true)
+
+    void (async () => {
+      try {
+        const tags = await openingTagsForSelectedVariant()
+        if (cancelled) return
+        setPuzzleStartTagsDraft(tags)
+      } finally {
+        if (!cancelled) setPuzzleLoading(false)
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [modal, openingTagsForSelectedVariant])
+
   const markExplored = useCallback((parentId: string | null, childId: string | undefined) => {
     if (childId == null) return
     const m = exploredByParentRef.current
@@ -919,10 +1424,13 @@ export function BuildMode() {
           if (!failedPositionsRef.current.has(posKey)) {
             failedPositionsRef.current.add(posKey)
             setTrainFailed((n) => n + 1)
+            if (trainRunKind === 'fsrs' && activeRepertoireId) {
+              void recordPositionFsrsReview(activeRepertoireId, posKey, 'again')
+            }
           }
         }
 
-        if (trainRunActive && trainRunKind === 'random' && trainRunPositions) {
+        if (trainRunActive && (trainRunKind === 'random' || trainRunKind === 'fsrs') && trainRunPositions) {
           const nextIdx = trainRunIndex + 1
           setTrainRunIndex(nextIdx)
           const nextPos = trainRunPositions[nextIdx]
@@ -960,10 +1468,17 @@ export function BuildMode() {
         if (!passedPositionsRef.current.has(posKey)) {
           passedPositionsRef.current.add(posKey)
           setTrainPassed((n) => n + 1)
+          if (trainRunKind === 'fsrs' && activeRepertoireId) {
+            void recordPositionFsrsReview(activeRepertoireId, posKey, 'good')
+          }
         }
       }
 
-      if (trainRunActive && (trainRunKind === 'failed' || trainRunKind === 'random') && trainRunPositions) {
+      if (
+        trainRunActive &&
+        (trainRunKind === 'failed' || trainRunKind === 'random' || trainRunKind === 'fsrs') &&
+        trainRunPositions
+      ) {
         const nextIdx = trainRunIndex + 1
         setTrainRunIndex(nextIdx)
         const nextPos = trainRunPositions[nextIdx]
@@ -1240,7 +1755,7 @@ export function BuildMode() {
   ])
 
   return (
-    <div className="flex flex-1 flex-col gap-6 px-4 py-8">
+    <div className={['flex flex-1 flex-col gap-6 py-8', device.isMobile ? 'px-2 sm:px-4' : 'px-4'].join(' ')}>
       {view === 'home' ? (
         <div className="mx-auto w-full max-w-[920px] text-left">
           <div className="flex flex-wrap items-start justify-between gap-4">
@@ -1308,7 +1823,7 @@ export function BuildMode() {
             <UserProfileChrome placement="inline" />
           </div>
           {mode === 'train' ? (
-          <div className="mx-auto w-full max-w-[420px]">
+          <div className={['mx-auto w-full', device.isMobile ? 'max-w-none px-0' : 'max-w-[420px]'].join(' ')}>
             <div className="rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-2.5 shadow-[var(--shadow)] sm:p-3">
               <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
                 <div className="flex min-w-0 items-center gap-1.5">
@@ -1344,12 +1859,12 @@ export function BuildMode() {
                   </button>
                   <button
                     type="button"
-                    className="train-accent-btn train-accent-btn--icon"
+                    className="train-accent-btn train-accent-btn--icon inline-flex items-center justify-center"
                     aria-label="Paramètres de l'échiquier"
                     title="Paramètres"
                     onClick={() => setSettingsOpen(true)}
                   >
-                    ⚙
+                    <Settings className="h-[12.375px] w-[12.375px]" strokeWidth={2} aria-hidden />
                   </button>
                 </div>
               </div>
@@ -1371,6 +1886,7 @@ export function BuildMode() {
                     setShapesByFen((prev) => ({ ...prev, [currentFen]: next }))
                   }}
                   annotationMode={false}
+                  touchMoveMode={device.isMobile}
                 />
               </div>
 
@@ -1518,12 +2034,161 @@ export function BuildMode() {
                 ) : null}
             </div>
           </div>
+        ) : mode === 'puzzle' ? (
+          <div className={['mx-auto w-full', device.isMobile ? 'max-w-none px-0' : 'max-w-[420px]'].join(' ')}>
+            <div className="rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-2.5 shadow-[var(--shadow)] sm:p-3">
+              <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="truncate text-xs font-medium text-[var(--text-h)]">
+                    {activeRepertoire?.title ?? '—'} · Puzzles
+                  </div>
+                  <div className="mt-0.5 text-[10px] opacity-80">
+                    {activePuzzle
+                      ? `Puzzle ${puzzleIndex + 1}/${puzzleQueue.length} · ELO ${activePuzzle.rating}`
+                      : 'Aucun puzzle actif'}
+                  </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-0.5">
+                  <button type="button" className="train-accent-btn" onClick={() => setView('home')}>
+                    Home
+                  </button>
+                  <button type="button" className="train-accent-btn" onClick={() => setMode('build')}>
+                    Build
+                  </button>
+                  <button
+                    type="button"
+                    className="train-accent-btn train-accent-btn--icon inline-flex items-center justify-center"
+                    aria-label="Paramètres de l'échiquier"
+                    title="Paramètres"
+                    onClick={() => setSettingsOpen(true)}
+                  >
+                    <Settings className="h-[12.375px] w-[12.375px]" strokeWidth={2} aria-hidden />
+                  </button>
+                </div>
+              </div>
+
+              <Board
+                fen={puzzleFen ?? new Chess().fen()}
+                dests={puzzleDests}
+                showDests={showDests}
+                turnColor={puzzleTurnColor ?? 'white'}
+                orientation={boardOrientation}
+                onMove={onBoardMovePuzzle}
+                lastMove={undefined}
+                selectedSquare={null}
+                drawableEnabled
+                drawableVisible
+                shapes={[]}
+                annotationAutoShapes={puzzleHintShape}
+                onShapesChange={() => {
+                  /* no-op in puzzle mode */
+                }}
+                annotationMode={false}
+                touchMoveMode={device.isMobile}
+              />
+
+              <PuzzleSessionTimer startedAtMs={puzzleStartedAtMs} averageMs={puzzleAverageMs} />
+
+              <div className="mt-2 flex items-center gap-1 text-[11px]">
+                {(['easy', 'medium', 'hard'] as const).map((level) => (
+                  <button
+                    key={level}
+                    type="button"
+                    className={[
+                      'train-accent-btn',
+                      puzzleDifficulty === level ? 'ring-1 ring-[var(--accent)]' : '',
+                    ].join(' ')}
+                    disabled={puzzleLoading}
+                    onClick={() => reloadPuzzleQueueForDifficulty(level)}
+                  >
+                    {level === 'easy' ? 'Facile' : level === 'medium' ? 'Moyen' : 'Difficile'}
+                  </button>
+                ))}
+              </div>
+
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  className="train-accent-btn inline-flex items-center gap-1"
+                  onClick={skipPuzzle}
+                  disabled={!activePuzzle}
+                >
+                  <SkipForward className="h-3 w-3" aria-hidden />
+                  Puzzle suivant
+                </button>
+                <button
+                  type="button"
+                  className="train-accent-btn inline-flex items-center gap-1"
+                  onClick={showPuzzleSolution}
+                  disabled={!activePuzzle}
+                >
+                  <Eye className="h-3 w-3" aria-hidden />
+                  Montrer le coup
+                </button>
+              </div>
+
+              <div className="mt-2 flex flex-wrap items-center gap-1">
+                {puzzleResultEntries.length === 0 ? (
+                  <span className="text-[10px] opacity-70">Session en cours…</span>
+                ) : (
+                  puzzleResultEntries.map((entry, i) => (
+                    <button
+                      type="button"
+                      key={`${entry.puzzleIndex}-${entry.result}-${i}`}
+                      className={[
+                        'inline-flex h-5 w-5 items-center justify-center rounded-full border text-[10px] transition-opacity hover:opacity-90',
+                        entry.result === 'pass'
+                          ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-600'
+                          : 'border-red-500/50 bg-red-500/10 text-red-600',
+                      ].join(' ')}
+                      title={`${entry.result === 'pass' ? 'Réussi' : 'Raté'} · Revenir au puzzle #${entry.puzzleIndex + 1}`}
+                      onClick={() => jumpToPuzzleFromHistory(entry.puzzleIndex)}
+                    >
+                      {entry.result === 'pass' ? (
+                        <Check className="h-3 w-3" aria-hidden />
+                      ) : (
+                        <X className="h-3 w-3" aria-hidden />
+                      )}
+                    </button>
+                  ))
+                )}
+                {puzzleFeedback ? (
+                  <span
+                    className={[
+                      'ml-2 rounded px-1.5 py-0.5 text-[10px] font-medium',
+                      puzzleFeedback === 'pass' ? 'bg-emerald-500/15 text-emerald-600' : 'bg-red-500/15 text-red-600',
+                    ].join(' ')}
+                  >
+                    {puzzleFeedback === 'pass' ? 'Correct' : 'Incorrect'}
+                  </span>
+                ) : null}
+              </div>
+
+              <div className="mt-2 text-left text-[10px] opacity-80">
+                Ouvertures ciblées: {puzzleOpeningTags.slice(0, 5).join(', ') || '—'}
+                {puzzleOpeningTags.length > 5 ? ` +${puzzleOpeningTags.length - 5}` : ''}
+              </div>
+            </div>
+          </div>
         ) : (
-          <div className="mx-auto grid w-full max-w-[1126px] grid-cols-1 gap-6 lg:grid-cols-[340px_1fr]">
-            <aside className="rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-4 shadow-[var(--shadow)]">
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex min-w-0 items-center gap-2">
-                  <span className="truncate text-sm font-medium text-black dark:text-neutral-100">
+          <div
+            className={[
+              'mx-auto w-full max-w-[1126px] gap-6',
+              device.isMobile && mode === 'build'
+                ? 'flex flex-col pb-[calc(4.25rem+env(safe-area-inset-bottom,0px))]'
+                : 'grid grid-cols-1 lg:grid-cols-[340px_1fr]',
+            ].join(' ')}
+          >
+            <aside
+              className={[
+                'rounded-xl border border-[var(--border)] bg-[var(--social-bg)] shadow-[var(--shadow)]',
+                device.isMobile ? 'p-2 sm:p-4' : 'p-4',
+                device.isMobile && mode === 'build' && mobileBuildTab !== 'tree' ? 'hidden' : '',
+              ].join(' ')}
+            >
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex min-w-0 flex-1 items-center gap-2">
+                  <span className="truncate text-sm font-medium leading-none text-black dark:text-neutral-100">
                     {activeRepertoire?.title ?? '—'}
                   </span>
                   {activeRepertoire?.side ? (
@@ -1539,10 +2204,10 @@ export function BuildMode() {
                     />
                   ) : null}
                 </div>
-                <div className="flex shrink-0 gap-2">
+                <div className="flex shrink-0 items-center gap-2">
                   <button
                     type="button"
-                    className="counter"
+                    className="counter mb-0 inline-flex items-center"
                     onClick={() => {
                       if (!activeRepertoireId) return
                       setModal({
@@ -1556,8 +2221,26 @@ export function BuildMode() {
                   >
                     Train
                   </button>
-                  <button type="button" className="counter" onClick={() => setView('home')}>
+                  <button
+                    type="button"
+                    className="counter mb-0 inline-flex items-center"
+                    onClick={() => setView('home')}
+                  >
                     Home
+                  </button>
+                  <button
+                    type="button"
+                    className="counter mb-0 inline-flex items-center"
+                    onClick={() =>
+                      setModal({
+                        kind: 'puzzleStart',
+                        hasSelection: currentNodeId != null,
+                      })
+                    }
+                    disabled={!activeRepertoireId || trainPositions.length === 0}
+                    title="Puzzles liés au répertoire"
+                  >
+                    Puzzles
                   </button>
                 </div>
               </div>
@@ -1698,14 +2381,25 @@ export function BuildMode() {
               )}
             </aside>
 
-            <main className="rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-4 shadow-[var(--shadow)]">
-              <div className="mx-auto w-full max-w-[420px]">
-                <div className="mb-3 flex h-8 items-center justify-between gap-2">
-                  <div className="flex h-8 items-center gap-1.5">
+            <main
+              className={[
+                'rounded-xl border border-[var(--border)] bg-[var(--social-bg)] shadow-[var(--shadow)]',
+                device.isMobile ? 'p-2 sm:p-4' : 'p-4',
+                device.isMobile && mode === 'build' && mobileBuildTab !== 'board' ? 'hidden' : '',
+              ].join(' ')}
+            >
+              <div
+                className={[
+                  'mx-auto w-full',
+                  device.isMobile ? 'max-w-none' : 'max-w-[420px]',
+                ].join(' ')}
+              >
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5">
                     <button
                       type="button"
                       className={[
-                        'inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full shadow-sm transition-transform active:scale-90',
+                        'inline-flex h-3.5 w-3.5 flex-shrink-0 items-center justify-center rounded-full shadow-sm transition-transform active:scale-90',
                         annotationBrush === 'red'
                           ? 'bg-red-600 hover:bg-red-500'
                           : annotationBrush === 'blue'
@@ -1726,7 +2420,7 @@ export function BuildMode() {
                     <button
                       type="button"
                       className={[
-                        'inline-flex h-7 w-7 items-center justify-center rounded-[5px] border-2 text-[var(--text-h)] transition-colors',
+                        'inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-[5px] border-2 leading-none text-[var(--text-h)] transition-colors',
                         annotationTool === 'arrow'
                           ? 'border-transparent bg-[var(--accent-bg)] text-[var(--accent)] hover:border-[var(--accent-border)]'
                           : 'border-transparent bg-transparent opacity-60 hover:bg-[var(--accent-bg)] hover:opacity-100 hover:text-[var(--accent)]',
@@ -1740,7 +2434,7 @@ export function BuildMode() {
                     <button
                       type="button"
                       className={[
-                        'inline-flex h-7 w-7 items-center justify-center rounded-[5px] border-2 text-[var(--text-h)] transition-colors',
+                        'inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-[5px] border-2 leading-none text-[var(--text-h)] transition-colors',
                         annotationTool === 'circle'
                           ? 'border-transparent bg-[var(--accent-bg)] text-[var(--accent)] hover:border-[var(--accent-border)]'
                           : 'border-transparent bg-transparent opacity-60 hover:bg-[var(--accent-bg)] hover:opacity-100 hover:text-[var(--accent)]',
@@ -1752,11 +2446,11 @@ export function BuildMode() {
                       <Circle className="h-3 w-3" strokeWidth={2.25} aria-hidden />
                     </button>
                   </div>
-                  <div className="flex h-8 shrink-0 items-center gap-1">
+                  <div className="flex shrink-0 items-center gap-1">
                     <button
                       type="button"
                       className={[
-                        'counter inline-flex h-7 w-7 items-center justify-center !p-0 text-sm',
+                        'counter mb-0 inline-flex h-7 w-7 flex-shrink-0 items-center justify-center !p-0 leading-none',
                         engineBuildOn ? 'border-[var(--accent)] bg-[var(--accent-bg)] text-[var(--accent)]' : '',
                       ].join(' ')}
                       aria-pressed={engineBuildOn}
@@ -1768,12 +2462,12 @@ export function BuildMode() {
                     </button>
                     <button
                       type="button"
-                      className="counter inline-flex h-7 w-7 flex-shrink-0 items-center justify-center !p-0 text-sm"
+                      className="counter mb-0 inline-flex h-7 w-7 flex-shrink-0 items-center justify-center !p-0 leading-none"
                       aria-label="Paramètres de l'échiquier"
                       title="Paramètres"
                       onClick={() => setSettingsOpen(true)}
                     >
-                      ⚙
+                      <Settings className="h-[18px] w-[18px]" strokeWidth={2} aria-hidden />
                     </button>
                   </div>
                 </div>
@@ -1809,6 +2503,7 @@ export function BuildMode() {
                       onAnnotateStart={onAnnotateStart}
                       onAnnotateMove={onAnnotateMove}
                       onAnnotateEnd={onAnnotateEnd}
+                      touchMoveMode={device.isMobile}
                     />
                   </div>
                 </div>
@@ -1825,17 +2520,116 @@ export function BuildMode() {
                 ) : null}
               </div>
             </main>
+
+            {device.isMobile && mode === 'build' ? (
+              <nav
+                className="fixed bottom-0 left-0 right-0 z-[52] flex gap-1 border-t border-[var(--border)] bg-[var(--bg)]/95 px-2 pt-1.5 backdrop-blur-md pb-[calc(0.5rem+env(safe-area-inset-bottom,0px))]"
+                role="tablist"
+                aria-label="Navigation build"
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={mobileBuildTab === 'tree'}
+                  className={[
+                    'flex flex-1 flex-col items-center gap-0.5 rounded-lg py-2 text-[11px] font-medium transition-colors',
+                    mobileBuildTab === 'tree'
+                      ? 'bg-[var(--accent-bg)] text-[var(--accent)]'
+                      : 'text-[var(--text)] opacity-80 hover:bg-[var(--code-bg)]',
+                  ].join(' ')}
+                  onClick={() => setMobileBuildTab('tree')}
+                >
+                  <ListTree className="h-5 w-5" strokeWidth={2} aria-hidden />
+                  Arbre
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={mobileBuildTab === 'board'}
+                  className={[
+                    'flex flex-1 flex-col items-center gap-0.5 rounded-lg py-2 text-[11px] font-medium transition-colors',
+                    mobileBuildTab === 'board'
+                      ? 'bg-[var(--accent-bg)] text-[var(--accent)]'
+                      : 'text-[var(--text)] opacity-80 hover:bg-[var(--code-bg)]',
+                  ].join(' ')}
+                  onClick={() => setMobileBuildTab('board')}
+                >
+                  <LayoutGrid className="h-5 w-5" strokeWidth={2} aria-hidden />
+                  Échiquier
+                </button>
+              </nav>
+            ) : null}
           </div>
           )}
         </>
       )}
+
+      {modal?.kind === 'puzzleStart' ? (
+        <ModalFrame
+          title="Puzzles liés au répertoire"
+          onClose={() => setModal(null)}
+          actions={
+            <div className="flex gap-2">
+              <button type="button" className="counter" onClick={() => setModal(null)}>
+                Annuler
+              </button>
+              <button
+                type="button"
+                className="counter"
+                disabled={puzzleLoading || !modal.hasSelection || puzzleStartTagsDraft.length === 0}
+                onClick={() =>
+                  void loadPuzzleQueue({
+                    openingTags: puzzleStartTagsDraft,
+                  })
+                }
+              >
+                Démarrer
+              </button>
+            </div>
+          }
+        >
+          <div className="space-y-3 text-sm">
+            <div className="rounded border border-[var(--border)] bg-[var(--bg)] p-2 text-xs">
+              <div className="mb-1 text-[10px] font-medium uppercase tracking-wide opacity-70">Ouvertures détectées</div>
+              {puzzleStartTagsDraft.length === 0 ? (
+                <div className="opacity-70">{puzzleLoading ? 'Analyse…' : 'Aucun tag détecté.'}</div>
+              ) : (
+                <div className="flex flex-wrap gap-1">
+                  {puzzleStartTagsDraft
+                    .slice()
+                    .sort((a, b) => a.localeCompare(b))
+                    .map((tag) => (
+                      <span
+                        key={tag}
+                        className="rounded border border-[var(--accent-border)] bg-[var(--accent-bg)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--accent)]"
+                      >
+                        {tag}
+                      </span>
+                    ))}
+                </div>
+              )}
+            </div>
+
+            <div className="rounded border border-[var(--border)] bg-[var(--bg)] px-2 py-2 text-xs">
+              Portée: <span className="font-medium text-[var(--text-h)]">Variante actuelle</span>
+            </div>
+
+            {!modal.hasSelection ? (
+              <div className="text-xs opacity-80">
+                Sélectionne une position dans l'arbre avant de lancer les puzzles.
+              </div>
+            ) : null}
+            {puzzleLoading ? <div className="text-xs opacity-80">Analyse des ouvertures…</div> : null}
+          </div>
+        </ModalFrame>
+      ) : null}
 
       {modal?.kind === 'trainStart' ? (
         <ModalFrame
           title="Démarrer un entraînement"
           onClose={() => setModal(null)}
           actions={
-            <div className="flex gap-2">
+            <div className="flex flex-wrap justify-end gap-2">
               <button
                 type="button"
                 className="counter"
@@ -1879,6 +2673,34 @@ export function BuildMode() {
               >
                 Positions aléatoires
               </button>
+              <button
+                type="button"
+                className="counter"
+                disabled={
+                  modal.fullCount === 0 ||
+                  fsrsQueuePreviewCount === null ||
+                  fsrsQueuePreviewCount === 0
+                }
+                onClick={() => {
+                  if (!activeRepertoireId) return
+                  void (async () => {
+                    const q = await buildFsrsTrainQueue(activeRepertoireId, trainPositions)
+                    if (q.length === 0) {
+                      setToast({ type: 'info', message: 'Aucune position dans la file FSRS pour le moment.' })
+                      return
+                    }
+                    setModal(null)
+                    void startTrainRun({ kind: 'fsrs', positions: q })
+                  })()
+                }}
+              >
+                FSRS
+                {fsrsQueuePreviewCount != null ? (
+                  <span className="ml-1 font-mono text-[11px] opacity-90">({fsrsQueuePreviewCount})</span>
+                ) : (
+                  <span className="ml-1 font-mono text-[11px] opacity-60">(…)</span>
+                )}
+              </button>
             </div>
           }
         >
@@ -1888,6 +2710,11 @@ export function BuildMode() {
             </div>
             <div>
               Variante sélectionnée: <span className="font-mono">{modal.selectionCount}</span> positions.
+            </div>
+            <div className="text-[var(--text)] opacity-90">
+              <span className="font-medium text-[var(--text-h)]">FSRS</span> : positions dues + nouvelles positions
+              chaque jour (quota qui augmente jour après jour). Algorithme{' '}
+              <span className="font-mono text-[11px]">ts-fsrs</span>.
             </div>
           </div>
           {!modal.hasSelection ? (
@@ -2298,6 +3125,25 @@ function SummaryBlock({ total, passed, failed }: { total: number; passed: number
   )
 }
 
+function PuzzleSessionTimer({ startedAtMs, averageMs }: { startedAtMs: number | null; averageMs: number }) {
+  const [nowMs, setNowMs] = useState(() => Date.now())
+
+  useEffect(() => {
+    setNowMs(Date.now())
+    const t = window.setInterval(() => setNowMs(Date.now()), 1000)
+    return () => window.clearInterval(t)
+  }, [startedAtMs])
+
+  const elapsed = startedAtMs == null ? 0 : Math.max(0, nowMs - startedAtMs)
+  return (
+    <div className="mt-1.5 text-left text-[10px] opacity-80">
+      Temps puzzle: <span className="font-mono">{formatDurationMs(elapsed)}</span>
+      <span className="mx-1.5">·</span>
+      Moyenne session: <span className="font-mono">{formatDurationMs(averageMs)}</span>
+    </div>
+  )
+}
+
 function SettingsPopup({
   fen,
   flipBoard,
@@ -2420,44 +3266,17 @@ function HomeSection({
           repertoires.map((r) => (
             <div
               key={r.id}
-              className="flex items-stretch gap-0 overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg)] hover:shadow-[var(--shadow)]"
+              className="flex min-w-0 items-stretch gap-0 overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg)] hover:shadow-[var(--shadow)]"
             >
-              <div className="flex min-w-0 flex-1 flex-col px-3 py-2">
-                <div className="flex min-w-0 items-center gap-1">
-                  <button
-                    type="button"
-                    className="min-w-0 flex-1 truncate text-left text-sm font-medium text-[var(--text-h)]"
-                    onClick={() => onOpen(r.id)}
-                  >
-                    {r.title}
-                  </button>
-                  <div className="flex shrink-0 flex-row items-center gap-0.5">
-                    <button
-                      type="button"
-                      className="inline-flex h-6 w-6 items-center justify-center rounded text-[var(--text)] opacity-70 hover:bg-[var(--accent-bg)] hover:text-[var(--accent)] hover:opacity-100"
-                      aria-label={`Renommer ${r.title}`}
-                      title="Renommer"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        onRename(r)
-                      }}
-                    >
-                      <Pencil className="h-3.5 w-3.5" aria-hidden />
-                    </button>
-                    <button
-                      type="button"
-                      className="inline-flex h-6 w-6 items-center justify-center rounded text-[var(--text)] opacity-70 hover:bg-red-500/15 hover:text-red-600 hover:opacity-100 dark:hover:text-red-400"
-                      aria-label={`Supprimer ${r.title}`}
-                      title="Supprimer le répertoire"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        onDelete(r)
-                      }}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" aria-hidden />
-                    </button>
-                  </div>
-                </div>
+              {/* 1 — titre + sous-titre (prend l’espace horizontal disponible) */}
+              <div className="flex min-w-0 flex-1 flex-col px-3 py-2 text-left">
+                <button
+                  type="button"
+                  className="min-w-0 truncate text-left text-sm font-medium text-[var(--text-h)]"
+                  onClick={() => onOpen(r.id)}
+                >
+                  {r.title}
+                </button>
                 <button
                   type="button"
                   className="mt-0.5 w-full text-left text-xs opacity-80 hover:opacity-100"
@@ -2466,6 +3285,53 @@ function HomeSection({
                   {repertoireCounts[r.id] ?? 0} positions enregistrées
                 </button>
               </div>
+              {/* 2 — flamme seule, centrée verticalement */}
+              <div
+                className={[
+                  'flex shrink-0 items-center justify-center',
+                  r.trainStreak != null && r.trainStreak > 0 ? 'min-w-[2.25rem] px-1' : 'w-0 min-w-0 overflow-hidden p-0',
+                ].join(' ')}
+              >
+                {r.trainStreak != null && r.trainStreak > 0 ? (
+                  <span
+                    className="relative inline-flex h-8 w-7 shrink-0 items-end justify-center text-[var(--accent)]"
+                    title={`Série : ${r.trainStreak} jour${r.trainStreak > 1 ? 's' : ''} consécutif${r.trainStreak > 1 ? 's' : ''}`}
+                  >
+                    <Flame className="h-8 w-8 shrink-0" fill="currentColor" stroke="none" aria-hidden />
+                    <span className="pointer-events-none absolute bottom-[5px] left-1/2 -translate-x-1/2 text-[10px] font-bold leading-none text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.55)] tabular-nums">
+                      {r.trainStreak}
+                    </span>
+                  </span>
+                ) : null}
+              </div>
+              {/* 3 — renommer / supprimer, alignés en haut */}
+              <div className="flex shrink-0 flex-row items-start gap-0.5 self-start pl-2 pr-3 pt-2.5">
+                <button
+                  type="button"
+                  className="inline-flex h-6 w-6 items-center justify-center rounded text-[var(--text)] opacity-70 hover:bg-[var(--accent-bg)] hover:text-[var(--accent)] hover:opacity-100"
+                  aria-label={`Renommer ${r.title}`}
+                  title="Renommer"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onRename(r)
+                  }}
+                >
+                  <Pencil className="h-3.5 w-3.5" aria-hidden />
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex h-6 w-6 items-center justify-center rounded text-[var(--text)] opacity-70 hover:bg-red-500/15 hover:text-red-600 hover:opacity-100 dark:hover:text-red-400"
+                  aria-label={`Supprimer ${r.title}`}
+                  title="Supprimer le répertoire"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onDelete(r)
+                  }}
+                >
+                  <Trash2 className="h-3.5 w-3.5" aria-hidden />
+                </button>
+              </div>
+              {/* 4 — télécharger / partager */}
               <div className="flex shrink-0 flex-col justify-center gap-0.5 border-l border-[var(--border)] px-0.5 py-1">
                 <button
                   type="button"

@@ -1,4 +1,5 @@
 import { db, type TrainRunRecord } from './schema'
+import { scheduleRepertoireSync } from '../sync/repertoireSync'
 
 export type { TrainRunRecord } from './schema'
 
@@ -40,6 +41,31 @@ export async function insertTrainRun(
   }
   await db.trainRuns.add(row)
   await touchTrainActivityDay(endedAt)
+  await bumpRepertoireTrainStreak(input.repertoireId, endedAt)
+}
+
+/** Incrémente la série de jours consécutifs pour ce répertoire (après un run terminé). */
+export async function bumpRepertoireTrainStreak(repertoireId: string, endedAt: number): Promise<void> {
+  const today = dayKeyFromTimestamp(endedAt)
+  const row = await db.repertoires.get(repertoireId)
+  if (!row) return
+  const last = row.lastTrainDayKey
+  const prev = row.trainStreak ?? 0
+  let next = 1
+  if (last === today) {
+    next = prev
+  } else if (last === dayBeforeLocal(today)) {
+    next = prev + 1
+  } else {
+    next = 1
+  }
+  await db.repertoires.update(repertoireId, {
+    trainStreak: next,
+    lastTrainDayKey: today,
+    updatedAt: Date.now(),
+    dirty: true,
+  })
+  scheduleRepertoireSync()
 }
 
 export async function listTrainRuns(filter: { repertoireId?: string | 'all' }): Promise<TrainRunRecord[]> {
