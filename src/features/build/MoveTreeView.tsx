@@ -1,6 +1,7 @@
 import { useMemo, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react'
 import type { Move } from '../../db/schema'
 import type { MoveForest, MoveNode } from '../../chess/moveTree'
+import { useI18n } from '../../i18n'
 
 type Props = {
   forest: MoveForest
@@ -10,6 +11,7 @@ type Props = {
 }
 
 export function MoveTreeView({ forest, pathIds, onSelectMove, onDeleteMove }: Props) {
+  const { t } = useI18n()
   const [expandedVarKeys, setExpandedVarKeys] = useState<Set<string>>(() => new Set())
   const [expandedContinuationIds, setExpandedContinuationIds] = useState<Set<string>>(() => new Set())
 
@@ -26,7 +28,7 @@ export function MoveTreeView({ forest, pathIds, onSelectMove, onDeleteMove }: Pr
   return (
     <div className="rounded-md border border-[var(--border)] bg-[var(--bg)] p-2">
       <div className="mt-1 text-sm leading-5">
-        {renderForest(forest, pathIds, onSelectMove, onDeleteMove, 0, 'root', true, ctx)}
+        {renderForest(forest, pathIds, onSelectMove, onDeleteMove, 0, 'root', true, ctx, t)}
       </div>
     </div>
   )
@@ -101,9 +103,10 @@ function renderForest(
   forestKey: string,
   atLineStart: boolean,
   ctx: Ctx,
+  t: ReturnType<typeof useI18n>['t'],
 ) {
   if (forest.length === 0) {
-    return <span className="opacity-80">(vide)</span>
+    return <span className="opacity-80">{t({ en: '(empty)', fr: '(vide)' })}</span>
   }
 
   // Lichess-like: pick first as mainline, render siblings as variations.
@@ -114,7 +117,7 @@ function renderForest(
 
   return (
     <>
-      {main ? renderLine(main, pathIds, onSelectMove, onDeleteMove, depth, atLineStart, ctx) : null}
+      {main ? renderLine(main, pathIds, onSelectMove, onDeleteMove, depth, atLineStart, ctx, t) : null}
 
       {showVarsToggle ? (
         <div className="mt-1">
@@ -142,7 +145,7 @@ function renderForest(
             <div className="mt-1 space-y-1 border-l border-[var(--border)] pl-2">
               {vars.map((v) => (
                 <div key={v.move.id} className="opacity-95">
-                  {renderLine(v, pathIds, onSelectMove, onDeleteMove, depth, true, ctx)}
+                  {renderLine(v, pathIds, onSelectMove, onDeleteMove, depth, true, ctx, t)}
                 </div>
               ))}
             </div>
@@ -169,6 +172,7 @@ function renderLine(
   depth: number,
   atLineStart: boolean,
   ctx: Ctx,
+  t: ReturnType<typeof useI18n>['t'],
 ): ReactNode {
   const id = node.move.id
   const isInPath = id != null && pathIds.has(id)
@@ -228,6 +232,7 @@ function renderLine(
           String(id ?? 'x'),
           false,
           ctx,
+          t,
         )
       )}
     </>

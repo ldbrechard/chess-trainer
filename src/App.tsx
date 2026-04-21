@@ -2,12 +2,15 @@ import './App.css'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { AuthScreen } from './components/AuthScreen'
+import { SharedRepertoirePage } from './components/SharedRepertoirePage'
 import { BuildMode } from './features/build/BuildMode'
+import { useI18n } from './i18n'
 import { getSupabaseClient, isSupabaseConfigured } from './lib/supabaseClient'
 import { AppSyncProvider } from './sync/AppSyncProvider'
 import { runRepertoireSync } from './sync/repertoireSync'
 
 function AppShell() {
+  const { t } = useI18n()
   const configured = isSupabaseConfigured()
   const [session, setSession] = useState<Session | null | undefined>(() => (configured ? undefined : null))
   const [online, setOnline] = useState(() => typeof navigator !== 'undefined' && navigator.onLine)
@@ -15,6 +18,8 @@ function AppShell() {
   const [lastSyncError, setLastSyncError] = useState<string | null>(null)
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null)
   const [authModalOpen, setAuthModalOpen] = useState(false)
+  const [pathname, setPathname] = useState(() => window.location.pathname)
+  const sharedMatch = pathname.match(/^\/share\/r\/([0-9a-fA-F-]{36})$/)
 
   useEffect(() => {
     const on = () => setOnline(true)
@@ -25,6 +30,12 @@ function AppShell() {
       window.removeEventListener('online', on)
       window.removeEventListener('offline', off)
     }
+  }, [])
+
+  useEffect(() => {
+    const onPopState = () => setPathname(window.location.pathname)
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
   }, [])
 
   useEffect(() => {
@@ -43,7 +54,7 @@ function AppShell() {
     setLastSyncError(null)
     try {
       const r = await runRepertoireSync()
-      if (!r.ok) setLastSyncError(r.error ?? 'Erreur sync')
+      if (!r.ok) setLastSyncError(r.error ?? t({ en: 'Sync error', fr: 'Erreur de synchronisation' }))
       else setLastSyncedAt(Date.now())
     } finally {
       setSyncRunning(false)
@@ -87,7 +98,7 @@ function AppShell() {
               type="button"
               className="counter absolute right-2 top-2 text-sm"
               onClick={() => setAuthModalOpen(false)}
-              aria-label="Fermer"
+              aria-label={t({ en: 'Close', fr: 'Fermer' })}
             >
               ✕
             </button>
@@ -95,7 +106,17 @@ function AppShell() {
           </div>
         </div>
       ) : null}
-      <BuildMode />
+      {sharedMatch ? (
+        <SharedRepertoirePage
+          shareId={sharedMatch[1]!}
+          onOpenApp={() => {
+            history.replaceState({}, '', '/')
+            setPathname('/')
+          }}
+        />
+      ) : (
+        <BuildMode />
+      )}
     </AppSyncProvider>
   )
 }

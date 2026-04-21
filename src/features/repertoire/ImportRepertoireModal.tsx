@@ -3,6 +3,7 @@ import { useCallback, useEffect, useId, useState } from 'react'
 import { bulkInsertMovesForRepertoire, createRepertoire } from '../../db/repertoireRepo'
 import type { Side } from '../../db/schema'
 import { fetchLichessStudyPgnText, studyPageUrlToPgnFetchUrl } from '../../lib/lichessStudyPgn'
+import { useI18n } from '../../i18n'
 import { tryBuildImportPreview, type PgnImportPreview } from '../../lib/pgnImportExport'
 
 type Step = 'source' | 'preview'
@@ -24,6 +25,7 @@ async function readFileAsUtf8Text(file: File): Promise<string> {
 }
 
 function PgnHelpTooltip({ id }: { id: string }) {
+  const { t } = useI18n()
   return (
     <div
       id={id}
@@ -31,44 +33,48 @@ function PgnHelpTooltip({ id }: { id: string }) {
       className="pointer-events-none invisible absolute left-0 top-full z-[80] -mt-1 w-[min(100vw-2rem,19rem)] rounded-md border border-neutral-700 bg-black p-2 pt-2.5 text-left text-[10px] leading-snug text-white opacity-0 shadow-lg transition-opacity duration-100 group-hover:pointer-events-auto group-hover:visible group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:visible group-focus-within:opacity-100"
     >
       <div className="max-h-[min(65vh,22rem)] space-y-2 overflow-y-auto">
-        <p className="m-0 font-semibold text-white">Comment obtenir du PGN ?</p>
+        <p className="m-0 font-semibold text-white">{t({ en: 'How to get PGN?', fr: 'Comment obtenir du PGN ?' })}</p>
 
         <section>
-          <h4 className="m-0 font-semibold text-neutral-300">Fichier</h4>
+          <h4 className="m-0 font-semibold text-neutral-300">{t({ en: 'File', fr: 'Fichier' })}</h4>
           <ul className="mt-0.5 list-disc space-y-0.5 pl-3.5 text-neutral-100">
             <li>
-              <span className="font-medium text-white">Upload PGN</span> ouvre le sélecteur (
+              <span className="font-medium text-white">{t({ en: 'Upload PGN', fr: 'Upload PGN' })}</span>{' '}
+              {t({ en: 'opens the file picker', fr: 'ouvre le sélecteur' })} (
               <span className="font-mono">.pgn</span> ou texte).
             </li>
-            <li>Vous pouvez aussi coller dans la zone de texte.</li>
+            <li>{t({ en: 'You can also paste into the text area.', fr: 'Vous pouvez aussi coller dans la zone de texte.' })}</li>
           </ul>
         </section>
 
         <section>
-          <h4 className="m-0 font-semibold text-neutral-300">Lichess — étude</h4>
+          <h4 className="m-0 font-semibold text-neutral-300">{t({ en: 'Lichess — study', fr: 'Lichess — étude' })}</h4>
           <ul className="mt-0.5 list-disc space-y-0.5 pl-3.5 text-neutral-100">
-            <li>Étude → menu Share → copier l’URL (ex. <span className="break-all font-mono text-[9px]">lichess.org/study/…</span>).</li>
             <li>
-              Onglet <span className="font-medium text-white">URL Lichess</span> → coller →{' '}
-              <span className="font-medium text-white">Charger</span>.
+              {t({ en: 'Study → Share menu → copy URL (e.g.', fr: 'Étude → menu Share → copier l’URL (ex.' })}{' '}
+              <span className="break-all font-mono text-[9px]">lichess.org/study/…</span>).
             </li>
-            <li>Lien public (sans compte).</li>
+            <li>
+              {t({ en: 'Tab', fr: 'Onglet' })} <span className="font-medium text-white">URL Lichess</span> →{' '}
+              {t({ en: 'paste →', fr: 'coller →' })} <span className="font-medium text-white">{t({ en: 'Load', fr: 'Charger' })}</span>.
+            </li>
+            <li>{t({ en: 'Public link (no account).', fr: 'Lien public (sans compte).' })}</li>
           </ul>
         </section>
 
         <section>
-          <h4 className="m-0 font-semibold text-neutral-300">Lichess — partie</h4>
+          <h4 className="m-0 font-semibold text-neutral-300">{t({ en: 'Lichess — game', fr: 'Lichess — partie' })}</h4>
           <ul className="mt-0.5 list-disc space-y-0.5 pl-3.5 text-neutral-100">
-            <li>Sous l’échiquier : téléchargement PGN.</li>
-            <li>Fichier ou collage dans la zone.</li>
+            <li>{t({ en: 'Under the board: download PGN.', fr: 'Sous l’échiquier : téléchargement PGN.' })}</li>
+            <li>{t({ en: 'File upload or paste in text area.', fr: 'Fichier ou collage dans la zone.' })}</li>
           </ul>
         </section>
 
         <section>
           <h4 className="m-0 font-semibold text-neutral-300">Chess.com</h4>
           <ul className="mt-0.5 list-disc space-y-0.5 pl-3.5 text-neutral-100">
-            <li>Partie / ouverture → menu (⋮) ou Share → Export ou copie PGN.</li>
-            <li>Coller ou enregistrer puis Upload PGN.</li>
+            <li>{t({ en: 'Game/opening → menu (⋮) or Share → Export/copy PGN.', fr: 'Partie / ouverture → menu (⋮) ou Share → Export ou copie PGN.' })}</li>
+            <li>{t({ en: 'Paste directly or save then Upload PGN.', fr: 'Coller ou enregistrer puis Upload PGN.' })}</li>
           </ul>
         </section>
       </div>
@@ -77,6 +83,7 @@ function PgnHelpTooltip({ id }: { id: string }) {
 }
 
 export function ImportRepertoireModal({ open, onClose, onImported }: Props) {
+  const { t } = useI18n()
   const baseId = useId()
   const [step, setStep] = useState<Step>('source')
   const [sourceTab, setSourceTab] = useState<'file' | 'url'>('file')
@@ -138,18 +145,18 @@ export function ImportRepertoireModal({ open, onClose, onImported }: Props) {
       setSourceTab('file')
       setParseError(null)
     } catch {
-      setParseError('Impossible de lire le fichier.')
+      setParseError(t({ en: 'Unable to read file.', fr: 'Impossible de lire le fichier.' }))
     }
   }
 
   const loadFromUrl = useCallback(async () => {
     const u = urlDraft.trim()
     if (!u) {
-      setParseError('Colle une URL d’étude Lichess.')
+      setParseError(t({ en: 'Paste a Lichess study URL.', fr: 'Colle une URL d’étude Lichess.' }))
       return
     }
     if (!studyPageUrlToPgnFetchUrl(u)) {
-      setParseError('URL non reconnue (ex. https://lichess.org/study/… ).')
+      setParseError(t({ en: 'Unrecognized URL (e.g. https://lichess.org/study/… ).', fr: 'URL non reconnue (ex. https://lichess.org/study/… ).' }))
       return
     }
     setFetchingUrl(true)
@@ -176,17 +183,17 @@ export function ImportRepertoireModal({ open, onClose, onImported }: Props) {
 
   const confirmImport = async () => {
     if (!preview) return
-    const t = title.trim()
-    if (!t) return
+    const nextTitle = title.trim()
+    if (!nextTitle) return
     setBusy(true)
     setParseError(null)
     try {
-      const repId = await createRepertoire({ title: t.slice(0, 80), side })
+      const repId = await createRepertoire({ title: nextTitle.slice(0, 80), side })
       await bulkInsertMovesForRepertoire(repId, preview.rows)
       onImported(repId)
       onClose()
     } catch {
-      setParseError("Impossible d'enregistrer l'import.")
+      setParseError(t({ en: 'Unable to save import.', fr: "Impossible d'enregistrer l'import." }))
     } finally {
       setBusy(false)
     }
@@ -204,21 +211,21 @@ export function ImportRepertoireModal({ open, onClose, onImported }: Props) {
       >
         <div className="flex items-start justify-between gap-2">
           <h2 id={`${baseId}-title`} className="text-lg font-semibold">
-            Importer un répertoire
+            {t({ en: 'Import repertoire', fr: 'Importer un répertoire' })}
           </h2>
-          <button type="button" className="counter text-sm" onClick={onClose} aria-label="Fermer">
+          <button type="button" className="counter text-sm" onClick={onClose} aria-label={t({ en: 'Close', fr: 'Fermer' })}>
             ✕
           </button>
         </div>
 
         <div className="group relative mt-2 flex w-fit items-center gap-1.5 text-xs text-[var(--text)]">
-          <span>Aide export PGN</span>
+          <span>{t({ en: 'PGN export help', fr: 'Aide export PGN' })}</span>
           <span
             className="inline-flex h-5 w-5 cursor-help items-center justify-center rounded-full border border-[var(--border)] bg-[var(--bg)] text-[10px] font-semibold text-[var(--text-h)] outline-none ring-offset-2 hover:border-[var(--accent-border)] focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
             tabIndex={0}
             aria-describedby={`${baseId}-pgn-help`}
           >
-            ?<span className="sr-only">Aide import PGN</span>
+            ?<span className="sr-only">{t({ en: 'PGN import help', fr: 'Aide import PGN' })}</span>
           </span>
           <PgnHelpTooltip id={`${baseId}-pgn-help`} />
         </div>
@@ -230,7 +237,7 @@ export function ImportRepertoireModal({ open, onClose, onImported }: Props) {
               type="file"
               accept=".pgn,.PGN,.txt,text/plain,application/x-chess-pgn,application/octet-stream"
               className="sr-only"
-              aria-label="Choisir un fichier PGN"
+              aria-label={t({ en: 'Choose PGN file', fr: 'Choisir un fichier PGN' })}
               onChange={onPickFile}
               disabled={busy}
               tabIndex={-1}
@@ -249,7 +256,7 @@ export function ImportRepertoireModal({ open, onClose, onImported }: Props) {
                 onClick={() => setSourceTab('file')}
               >
                 <Upload className="h-3.5 w-3.5 shrink-0" aria-hidden />
-                Upload PGN
+                {t({ en: 'Upload PGN', fr: 'Upload PGN' })}
               </label>
               <button
                 type="button"
@@ -262,18 +269,18 @@ export function ImportRepertoireModal({ open, onClose, onImported }: Props) {
                 onClick={() => setSourceTab('url')}
               >
                 <Link2 className="h-3.5 w-3.5 shrink-0" aria-hidden />
-                URL Lichess
+                {t({ en: 'Lichess URL', fr: 'URL Lichess' })}
               </button>
             </div>
 
             {sourceTab === 'file' ? (
               <div>
                 <p className="text-xs text-[var(--text)] opacity-90">
-                  Collez le PGN ci-dessous si vous ne passez pas par un fichier.
+                  {t({ en: 'Paste PGN below if you are not using a file.', fr: 'Collez le PGN ci-dessous si vous ne passez pas par un fichier.' })}
                 </p>
                 <textarea
                   className="mt-2 min-h-[140px] w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-2 py-2 font-mono text-xs"
-                  placeholder="Coller le PGN ici…"
+                  placeholder={t({ en: 'Paste PGN here…', fr: 'Coller le PGN ici…' })}
                   value={pgnDraft}
                   onChange={(e) => setPgnDraft(e.target.value)}
                   spellCheck={false}
@@ -282,7 +289,7 @@ export function ImportRepertoireModal({ open, onClose, onImported }: Props) {
             ) : (
               <div>
                 <label className="block text-xs font-medium text-[var(--text-h)]" htmlFor={`${baseId}-url`}>
-                  URL d’étude (publique)
+                  {t({ en: 'Study URL (public)', fr: 'URL d’étude (publique)' })}
                 </label>
                 <div className="mt-2 flex gap-2">
                   <input
@@ -294,12 +301,12 @@ export function ImportRepertoireModal({ open, onClose, onImported }: Props) {
                     disabled={fetchingUrl}
                   />
                   <button type="button" className="counter shrink-0 text-xs" onClick={() => void loadFromUrl()} disabled={fetchingUrl}>
-                    {fetchingUrl ? '…' : 'Charger'}
+                    {fetchingUrl ? '…' : t({ en: 'Load', fr: 'Charger' })}
                   </button>
                 </div>
                 {pgnDraft && sourceTab === 'url' ? (
                   <details className="mt-2">
-                    <summary className="cursor-pointer text-xs opacity-80">Voir le PGN chargé</summary>
+                    <summary className="cursor-pointer text-xs opacity-80">{t({ en: 'View loaded PGN', fr: 'Voir le PGN chargé' })}</summary>
                     <textarea
                       className="mt-2 max-h-40 w-full rounded-md border border-[var(--border)] bg-[var(--social-bg)] px-2 py-2 font-mono text-[11px]"
                       readOnly
@@ -314,21 +321,23 @@ export function ImportRepertoireModal({ open, onClose, onImported }: Props) {
               {valid ? (
                 <>
                   <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-600" aria-hidden />
-                  <span className="text-emerald-800">Format PGN valide ({preview?.moves} coups).</span>
+                  <span className="text-emerald-800">
+                    {t({ en: 'Valid PGN format ({moves} moves).', fr: 'Format PGN valide ({moves} coups).' }, { moves: preview?.moves ?? 0 })}
+                  </span>
                 </>
               ) : parseError ? (
                 <span className="text-red-600">{parseError}</span>
               ) : pgnForValidation.trim() ? (
-                <span className="opacity-70">Analyse…</span>
+                <span className="opacity-70">{t({ en: 'Parsing…', fr: 'Analyse…' })}</span>
               ) : null}
             </div>
 
             <div className="flex justify-end gap-2 border-t border-[var(--border)] pt-4">
               <button type="button" className="counter text-sm" onClick={onClose}>
-                Annuler
+                {t({ en: 'Cancel', fr: 'Annuler' })}
               </button>
               <button type="button" className="counter text-sm" disabled={!valid} onClick={goPreview}>
-                Prévisualiser
+                {t({ en: 'Preview', fr: 'Prévisualiser' })}
               </button>
             </div>
           </div>
@@ -336,22 +345,22 @@ export function ImportRepertoireModal({ open, onClose, onImported }: Props) {
           <div className="mt-4 space-y-4">
             <div className="grid grid-cols-3 gap-2 text-center text-sm">
               <div className="rounded-md border border-[var(--border)] p-2">
-                <div className="text-xs opacity-70">Chapitres</div>
+                <div className="text-xs opacity-70">{t({ en: 'Chapters', fr: 'Chapitres' })}</div>
                 <div className="mt-1 font-mono font-medium">{preview?.chapters ?? '—'}</div>
               </div>
               <div className="rounded-md border border-[var(--border)] p-2">
-                <div className="text-xs opacity-70">Variantes</div>
+                <div className="text-xs opacity-70">{t({ en: 'Variations', fr: 'Variantes' })}</div>
                 <div className="mt-1 font-mono font-medium">{preview?.variants ?? '—'}</div>
               </div>
               <div className="rounded-md border border-[var(--border)] p-2">
-                <div className="text-xs opacity-70">Coups</div>
+                <div className="text-xs opacity-70">{t({ en: 'Moves', fr: 'Coups' })}</div>
                 <div className="mt-1 font-mono font-medium">{preview?.moves ?? '—'}</div>
               </div>
             </div>
 
             <div>
               <label className="text-xs font-medium text-[var(--text-h)]" htmlFor={`${baseId}-title-in`}>
-                Titre
+                {t({ en: 'Title', fr: 'Titre' })}
               </label>
               <input
                 id={`${baseId}-title-in`}
@@ -364,7 +373,7 @@ export function ImportRepertoireModal({ open, onClose, onImported }: Props) {
 
             <div>
               <label className="text-xs font-medium text-[var(--text-h)]" htmlFor={`${baseId}-side`}>
-                Couleur jouée
+                {t({ en: 'Side to play', fr: 'Couleur jouée' })}
               </label>
               <select
                 id={`${baseId}-side`}
@@ -372,8 +381,8 @@ export function ImportRepertoireModal({ open, onClose, onImported }: Props) {
                 value={side}
                 onChange={(e) => setSide(e.target.value as Side)}
               >
-                <option value="white">Blancs</option>
-                <option value="black">Noirs</option>
+                <option value="white">{t({ en: 'White', fr: 'Blancs' })}</option>
+                <option value="black">{t({ en: 'Black', fr: 'Noirs' })}</option>
               </select>
             </div>
 
@@ -381,10 +390,10 @@ export function ImportRepertoireModal({ open, onClose, onImported }: Props) {
 
             <div className="flex justify-end gap-2 border-t border-[var(--border)] pt-4">
               <button type="button" className="counter text-sm" onClick={() => setStep('source')} disabled={busy}>
-                Retour
+                {t({ en: 'Back', fr: 'Retour' })}
               </button>
               <button type="button" className="counter text-sm" disabled={busy || !title.trim()} onClick={() => void confirmImport()}>
-                {busy ? 'Import…' : 'Valider l’import'}
+                {busy ? t({ en: 'Importing…', fr: 'Import…' }) : t({ en: 'Confirm import', fr: 'Valider l’import' })}
               </button>
             </div>
           </div>

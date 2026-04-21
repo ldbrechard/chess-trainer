@@ -41,7 +41,7 @@ function ts(row: { updated_at?: string; created_at?: string }): number {
   return u ? new Date(u).getTime() : 0
 }
 
-function remoteToStoredRep(r: RepRow): StoredRepertoire {
+function remoteToStoredRep(r: RepRow, local?: StoredRepertoire): StoredRepertoire {
   return {
     id: r.id,
     title: r.title,
@@ -49,6 +49,13 @@ function remoteToStoredRep(r: RepRow): StoredRepertoire {
     createdAt: new Date(r.created_at).getTime(),
     updatedAt: ts(r),
     dirty: false,
+    // Preserve local-only training metadata (not stored remotely).
+    trainStreak: local?.trainStreak,
+    lastTrainDayKey: local?.lastTrainDayKey,
+    fsrsFirstDayKey: local?.fsrsFirstDayKey,
+    notificationsEnabled: local?.notificationsEnabled ?? false,
+    lastDailyReminderDayKey: local?.lastDailyReminderDayKey,
+    lastInactivityReminderDayKey: local?.lastInactivityReminderDayKey,
   }
 }
 
@@ -84,7 +91,7 @@ async function pullRemoteIntoDexie(supabase: SupabaseClient): Promise<void> {
     }
     if (local.dirty) continue
     if (remoteT >= local.updatedAt) {
-      await db.repertoires.put(remoteToStoredRep(r))
+      await db.repertoires.put(remoteToStoredRep(r, local))
       await replaceMovesFromRemote(supabase, r.id)
     }
   }

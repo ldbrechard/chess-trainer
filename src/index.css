@@ -70,6 +70,51 @@
   }
 }
 
+/* Visual theme presets:
+   - Keep using CSS variables in UI modules so new screens inherit these themes automatically. */
+:root[data-visual-theme='violet'] {
+  --text: #6b6375;
+  --text-h: #08060d;
+  --bg: #fff;
+  --border: #e5e4e7;
+  --code-bg: #f4f3ec;
+  --accent: #aa3bff;
+  --accent-bg: rgba(170, 59, 255, 0.1);
+  --accent-border: rgba(170, 59, 255, 0.5);
+  --social-bg: rgba(244, 243, 236, 0.5);
+  --shadow:
+    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+}
+
+:root[data-visual-theme='acid_blue'] {
+  --text: #4f5f7d;
+  --text-h: #0a1a36;
+  --bg: #edf4ff;
+  --border: #bfd3ef;
+  --code-bg: #dce8fb;
+  --accent: #0a66ff;
+  --accent-bg: rgba(10, 102, 255, 0.2);
+  --accent-border: rgba(10, 102, 255, 0.58);
+  --social-bg: rgba(196, 217, 247, 0.6);
+  --shadow:
+    rgba(10, 56, 122, 0.2) 0 10px 15px -3px, rgba(10, 56, 122, 0.12) 0 4px 6px -2px;
+}
+
+:root[data-visual-theme='dark_contrast'] {
+  --text: #d4d8e2;
+  --text-h: #ffffff;
+  --bg: #090b10;
+  --border: #3b4356;
+  --code-bg: #151a23;
+  --accent: #5eb2ff;
+  --accent-bg: rgba(94, 178, 255, 0.23);
+  --accent-border: rgba(94, 178, 255, 0.62);
+  --social-bg: rgba(22, 27, 36, 0.92);
+  --shadow:
+    rgba(0, 0, 0, 0.66) 0 10px 20px -3px, rgba(0, 0, 0, 0.5) 0 4px 8px -2px;
+  color-scheme: dark;
+}
+
 #root {
   width: 100%;
   max-width: 100%;
@@ -242,17 +287,8 @@ code {
   background: var(--code-bg);
 }
 
-/* Panneau menu profil : fond blanc opaque (lisible sur l’échiquier derrière) */
+/* Panneau menu profil : utilise le thème actif */
 .profile-drawer {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --border: #e5e4e7;
-  --social-bg: #f4f3ec;
-  --bg: #ffffff;
-  --code-bg: #f4f3ec;
-  --accent: #aa3bff;
-  --accent-bg: rgba(170, 59, 255, 0.12);
-  --accent-border: rgba(170, 59, 255, 0.45);
-  background: #ffffff;
+  background: var(--bg);
   color: var(--text-h);
 }

@@ -3,6 +3,7 @@ import { SlidersHorizontal } from 'lucide-react'
 import { Chess } from 'chess.js'
 
 import type { EngineEval } from '../../lib/stockfishClient'
+import { useI18n } from '../../i18n'
 import { formatEval } from '../../lib/stockfishClient'
 
 type ExplorerMove = {
@@ -104,6 +105,7 @@ export function OpeningExplorer({
   stockfishActive = false,
   stockfishEvaluateFen,
 }: Props) {
+  const { t } = useI18n()
   const [selectedBands, setSelectedBands] = useState<Set<number>>(() => new Set(RATING_BANDS.map((_, i) => i)))
   const [data, setData] = useState<ExplorerResponse | null>(null)
   const [loading, setLoading] = useState(false)
@@ -146,7 +148,12 @@ export function OpeningExplorer({
     if (!token) {
       setLoading(false)
       setData(null)
-      setError("Token Lichess manquant. Ajoute `VITE_LICHESS_TOKEN` dans `.env` (non commité).")
+      setError(
+        t({
+          en: 'Missing Lichess token. Add `VITE_LICHESS_TOKEN` to `.env` (not committed).',
+          fr: 'Token Lichess manquant. Ajoute `VITE_LICHESS_TOKEN` dans `.env` (non commité).',
+        }),
+      )
       return
     }
 
@@ -164,7 +171,7 @@ export function OpeningExplorer({
     const ac = new AbortController()
     abortRef.current = ac
 
-    const t = window.setTimeout(() => {
+    const timeoutId = window.setTimeout(() => {
       void (async () => {
         try {
           const url = new URL('https://explorer.lichess.ovh/lichess')
@@ -205,11 +212,21 @@ export function OpeningExplorer({
           setData(null)
           const msg = e instanceof Error ? e.message : String(e)
           if (isLikely429(e)) {
-            setError('Lichess Explorer est temporairement rate-limité (HTTP 429).')
+            setError(
+              t({
+                en: 'Lichess Explorer is temporarily rate-limited (HTTP 429).',
+                fr: 'Lichess Explorer est temporairement rate-limité (HTTP 429).',
+              }),
+            )
           } else if (msg.includes('HTTP ')) {
             setError(msg)
           } else {
-            setError('Impossible de contacter Lichess Explorer (réseau/CORS).')
+            setError(
+              t({
+                en: 'Unable to contact Lichess Explorer (network/CORS).',
+                fr: 'Impossible de contacter Lichess Explorer (réseau/CORS).',
+              }),
+            )
           }
         } finally {
           setLoading(false)
@@ -218,10 +235,10 @@ export function OpeningExplorer({
     }, 220)
 
     return () => {
-      window.clearTimeout(t)
+      window.clearTimeout(timeoutId)
       ac.abort()
     }
-  }, [cacheKey, fen, ratingsParam, token])
+  }, [cacheKey, fen, ratingsParam, t, token])
 
   const moves = data?.moves ?? []
   const [engineLineByUci, setEngineLineByUci] = useState<Record<string, string>>({})
@@ -272,10 +289,10 @@ export function OpeningExplorer({
               className="inline-flex min-w-0 items-center gap-1.5 text-xs font-medium text-[var(--text-h)] hover:underline"
               onClick={onToggleCollapsed}
               aria-expanded={!collapsed}
-              title={collapsed ? 'Déplier' : 'Replier'}
+              title={collapsed ? t({ en: 'Expand', fr: 'Déplier' }) : t({ en: 'Collapse', fr: 'Replier' })}
             >
               <span aria-hidden>{collapsed ? '▸' : '▾'}</span>
-              <span>Arbre d’ouverture</span>
+              <span>{t({ en: 'Opening tree', fr: 'Arbre d’ouverture' })}</span>
             </button>
             <span className="select-none text-[10px] font-normal uppercase tracking-wide opacity-45">
               Lichess
@@ -288,17 +305,20 @@ export function OpeningExplorer({
                   eloOptionsOpen ? 'border-[var(--accent)] bg-[var(--accent-bg)] text-[var(--accent)]' : '',
                 ].join(' ')}
                 aria-expanded={eloOptionsOpen}
-                aria-label="Options ELO (tranches de classement)"
-                title="Options ELO"
+                aria-label={t({ en: 'ELO options (rating bands)', fr: 'Options ELO (tranches de classement)' })}
+                title={t({ en: 'ELO options', fr: 'Options ELO' })}
                 onClick={() => setEloOptionsOpen((v) => !v)}
               >
                 <SlidersHorizontal className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
               </button>
               {eloOptionsOpen ? (
                 <div className="absolute right-0 top-full z-[70] mt-1 w-[min(calc(100vw-2rem),18rem)] rounded-md border border-neutral-200 bg-white p-3 text-left text-neutral-900 shadow-lg">
-                  <div className="text-xs font-medium">ELO (tranches)</div>
+                  <div className="text-xs font-medium">{t({ en: 'ELO (bands)', fr: 'ELO (tranches)' })}</div>
                   <p className="mt-1 text-[10px] leading-snug text-neutral-600">
-                    Clique pour activer / désactiver (au moins une tranche).
+                    {t({
+                      en: 'Click to enable/disable (at least one band).',
+                      fr: 'Clique pour activer / désactiver (au moins une tranche).',
+                    })}
                   </p>
                   <div className="mt-2 flex flex-wrap gap-2">
                     {RATING_BANDS.map((band, i) => {
@@ -353,7 +373,7 @@ export function OpeningExplorer({
                     target="_blank"
                     rel="noreferrer"
                   >
-                    Ouvrir la requête
+                    {t({ en: 'Open request', fr: 'Ouvrir la requête' })}
                   </a>
                   <button
                     type="button"
@@ -362,7 +382,7 @@ export function OpeningExplorer({
                       void navigator.clipboard.writeText(debugUrl)
                     }}
                   >
-                    Copier l’URL
+                    {t({ en: 'Copy URL', fr: 'Copier l’URL' })}
                   </button>
                 </div>
               ) : null}
@@ -370,7 +390,7 @@ export function OpeningExplorer({
           ) : null}
 
           <div className="mt-3 space-y-2">
-            {moves.length === 0 && !loading && !error ? <div className="text-xs opacity-80">(pas de données)</div> : null}
+            {moves.length === 0 && !loading && !error ? <div className="text-xs opacity-80">{t({ en: '(no data)', fr: '(pas de données)' })}</div> : null}
             {moves.map((m) => {
               const total = (m.white ?? 0) + (m.draws ?? 0) + (m.black ?? 0)
               const w = pct(m.white ?? 0, total)
@@ -387,7 +407,7 @@ export function OpeningExplorer({
                   type="button"
                   className="w-full rounded-md border border-[var(--border)] px-2 py-1 text-left hover:bg-[var(--accent-bg)]"
                   onClick={() => onPlayMove?.(m.uci)}
-                  title="Jouer ce coup"
+                  title={t({ en: 'Play this move', fr: 'Jouer ce coup' })}
                 >
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex min-w-0 items-baseline gap-2">

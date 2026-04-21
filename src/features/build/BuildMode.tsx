@@ -37,10 +37,11 @@ import {
   listRepertoires,
   promoteMoveToMainLine,
   updateMove,
+  updateRepertoireNotificationSettings,
   updateRepertoireTitle,
 } from '../../db/repertoireRepo'
 import { buildFsrsTrainQueue, recordPositionFsrsReview } from '../../db/fsrsRepo'
-import { insertTrainRun, touchTrainActivityDay } from '../../db/trainStatsRepo'
+import { dayKeyFromTimestamp, insertTrainRun, touchTrainActivityDay } from '../../db/trainStatsRepo'
 import { exportRepertoireToPgn } from '../../lib/pgnImportExport'
 import { normalizeToUsefulPuzzleTag } from '../../lib/puzzleOpeningTags'
 import { doesAnyPuzzleExistForOpeningTag, fetchPuzzlesByOpeningTags } from '../../lib/puzzleRepo'
@@ -61,6 +62,7 @@ import { ShareRepertoireModal } from '../repertoire/ShareRepertoireModal'
 import { MoveTreeView, formatMoveWithNag, moveNumberPrefix } from './MoveTreeView'
 import openingIslandIcon from '../../assets/icon.png'
 import { useDevice } from '../../hooks/useDevice'
+import { useI18n } from '../../i18n'
 import { OpeningExplorer } from './OpeningExplorer'
 
 type Toast = { type: 'info' | 'error'; message: string } | null
@@ -118,6 +120,79 @@ function formatDurationMs(ms: number): string {
   return `${mm}:${String(ss).padStart(2, '0')}`
 }
 
+type AnimationSpeed = 'very_fast' | 'fast' | 'medium' | 'slow'
+type PlaybackSettings = {
+  animationSpeed: AnimationSpeed
+  replayMoves: boolean
+  soundOn: boolean
+}
+type VisualTheme = 'violet' | 'acid_blue' | 'dark_contrast'
+
+const PLAYBACK_SETTINGS_STORAGE_KEY = 'chess-trainer:playback-settings:v1'
+const VISUAL_THEME_STORAGE_KEY = 'chess-trainer:visual-theme:v1'
+const DEFAULT_PLAYBACK_SETTINGS: PlaybackSettings = {
+  animationSpeed: 'fast',
+  replayMoves: true,
+  soundOn: false,
+}
+const DEFAULT_VISUAL_THEME: VisualTheme = 'violet'
+
+const SPEED_DELAY_MS: Record<AnimationSpeed, { replayStart: number; replayStep: number; autoReply: number; nextLine: number }> = {
+  very_fast: { replayStart: 80, replayStep: 120, autoReply: 120, nextLine: 500 },
+  fast: { replayStart: 180, replayStep: 240, autoReply: 250, nextLine: 1000 },
+  medium: { replayStart: 280, replayStep: 360, autoReply: 450, nextLine: 1500 },
+  slow: { replayStart: 420, replayStep: 520, autoReply: 700, nextLine: 2200 },
+}
+
+function readPlaybackSettings(): PlaybackSettings {
+  try {
+    const raw = window.localStorage.getItem(PLAYBACK_SETTINGS_STORAGE_KEY)
+    if (!raw) return DEFAULT_PLAYBACK_SETTINGS
+    const parsed = JSON.parse(raw) as Partial<PlaybackSettings> | null
+    if (!parsed || typeof parsed !== 'object') return DEFAULT_PLAYBACK_SETTINGS
+    const speed =
+      parsed.animationSpeed === 'very_fast' ||
+      parsed.animationSpeed === 'fast' ||
+      parsed.animationSpeed === 'medium' ||
+      parsed.animationSpeed === 'slow'
+        ? parsed.animationSpeed
+        : DEFAULT_PLAYBACK_SETTINGS.animationSpeed
+    return {
+      animationSpeed: speed,
+      replayMoves: typeof parsed.replayMoves === 'boolean' ? parsed.replayMoves : DEFAULT_PLAYBACK_SETTINGS.replayMoves,
+      soundOn: typeof parsed.soundOn === 'boolean' ? parsed.soundOn : DEFAULT_PLAYBACK_SETTINGS.soundOn,
+    }
+  } catch {
+    return DEFAULT_PLAYBACK_SETTINGS
+  }
+}
+
+function persistPlaybackSettings(s: PlaybackSettings) {
+  try {
+    window.localStorage.setItem(PLAYBACK_SETTINGS_STORAGE_KEY, JSON.stringify(s))
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function readVisualTheme(): VisualTheme {
+  try {
+    const raw = window.localStorage.getItem(VISUAL_THEME_STORAGE_KEY)
+    if (raw === 'violet' || raw === 'acid_blue' || raw === 'dark_contrast') return raw
+    return DEFAULT_VISUAL_THEME
+  } catch {
+    return DEFAULT_VISUAL_THEME
+  }
+}
+
+function persistVisualTheme(theme: VisualTheme) {
+  try {
+    window.localStorage.setItem(VISUAL_THEME_STORAGE_KEY, theme)
+  } catch {
+    // ignore storage errors
+  }
+}
+
 const PLAYED_PUZZLE_IDS_STORAGE_KEY = 'chess-trainer:puzzle-played-ids:v1'
 
 function readPlayedPuzzleIds(): Set<string> {
@@ -166,6 +241,7 @@ function expectedTrainReplies(children: Move[], mainLineOnly: boolean): Move[] {
 type MobileBuildTab = 'tree' | 'board'
 
 export function BuildMode() {
+  const { t } = useI18n()
   const device = useDevice()
   const [mobileBuildTab, setMobileBuildTab] = useState<MobileBuildTab>('board')
   const [view, setView] = useState<View>('home')
@@ -190,6 +266,9 @@ export function BuildMode() {
   const [mode, setMode] = useState<Mode>('build')
   const [, setRevealed] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [playbackSettings, setPlaybackSettings] = useState<PlaybackSettings>(() => readPlaybackSettings())
+  const [visualTheme, setVisualTheme] = useState<VisualTheme>(() => readVisualTheme())
+  const notificationsSupported = typeof window !== 'undefined' && 'Notification' in window
   const [flipBoard, setFlipBoard] = useState(false)
   const [showDests, setShowDests] = useState(true)
   const [showBoardAnnotations, setShowBoardAnnotations] = useState(true)
@@ -398,6 +477,7 @@ export function BuildMode() {
         .sort((a, b) => a.puzzleIndex - b.puzzleIndex),
     [puzzleResultsByIndex],
   )
+  const speedDelay = SPEED_DELAY_MS[playbackSettings.animationSpeed]
   const puzzleHintShape = useMemo((): DrawShape[] => {
     if (!puzzleShowHint || !activePuzzle) return []
     const next = activePuzzle.solutionUci[puzzleStep]
@@ -410,6 +490,15 @@ export function BuildMode() {
     if (puzzleDurationsMs.length === 0) return 0
     return Math.round(puzzleDurationsMs.reduce((sum, x) => sum + x, 0) / puzzleDurationsMs.length)
   }, [puzzleDurationsMs])
+  const puzzleStartPreviewTurnColor = useMemo<'white' | 'black'>(() => {
+    try {
+      const c = new Chess()
+      c.load(currentFen)
+      return c.turn() === 'w' ? 'white' : 'black'
+    } catch {
+      return 'white'
+    }
+  }, [currentFen])
 
   const annotationPreviewAutoShapes = useMemo((): DrawShape[] => {
     if (annotationTool !== 'arrow') return []
@@ -421,6 +510,121 @@ export function BuildMode() {
   const isAnnotating = mode === 'build' && annotationTool !== 'none'
   const whiteRepertoires = useMemo(() => repertoires.filter((r) => r.side === 'white'), [repertoires])
   const blackRepertoires = useMemo(() => repertoires.filter((r) => r.side === 'black'), [repertoires])
+
+  useEffect(() => {
+    persistPlaybackSettings(playbackSettings)
+  }, [playbackSettings])
+
+  useEffect(() => {
+    persistVisualTheme(visualTheme)
+    document.documentElement.setAttribute('data-visual-theme', visualTheme)
+  }, [visualTheme])
+
+  const toggleRepertoireNotifications = useCallback(() => {
+    if (!activeRepertoireId) return
+    const nextEnabled = !(activeRepertoire?.notificationsEnabled === true)
+    void (async () => {
+      if (nextEnabled && notificationsSupported && Notification.permission === 'default') {
+        try {
+          await Notification.requestPermission()
+        } catch {
+          // ignore request failures
+        }
+      }
+      await updateRepertoireNotificationSettings(activeRepertoireId, { notificationsEnabled: nextEnabled })
+      const rep = await getRepertoire(activeRepertoireId)
+      setActiveRepertoire(rep ?? null)
+    })()
+  }, [activeRepertoire?.notificationsEnabled, activeRepertoireId, notificationsSupported])
+
+  useEffect(() => {
+    if (!notificationsSupported) return
+    if (Notification.permission !== 'granted') return
+
+    let cancelled = false
+
+    const runReminderCheck = async () => {
+      const today = dayKeyFromTimestamp(Date.now())
+      const swReg =
+        'serviceWorker' in navigator ? await navigator.serviceWorker.ready.catch(() => null) : null
+
+      const reps = await listRepertoires()
+      for (const rep of reps) {
+        if (cancelled) return
+        if (rep.notificationsEnabled !== true) continue
+
+        const show = async (title: string, body: string, tag: string) => {
+          const payload = {
+            body,
+            tag,
+            icon: '/app-icon.png',
+            badge: '/app-icon.png',
+          }
+          if (swReg) await swReg.showNotification(title, payload)
+          else new Notification(title, payload)
+        }
+
+        const lastTrainDayKey = rep.lastTrainDayKey
+
+        // Daily reminder (once/day/repertoire): mention FSRS queue size to continue streak.
+        if (rep.lastDailyReminderDayKey !== today && lastTrainDayKey !== today) {
+          const moves = await listAllMoves(rep.id)
+          const trainPositions = [...new Set(moves.map((m) => m.parentId ?? null))]
+          const fsrsCount = (await buildFsrsTrainQueue(rep.id, trainPositions)).length
+          if (fsrsCount > 0) {
+            const streak = rep.trainStreak ?? 0
+            await show(
+              t({ en: 'Keep your streak alive', fr: 'Continue ta série' }),
+              t(
+                {
+                  en: '{title}: {count} FSRS positions due today. Streak: {streak} day(s).',
+                  fr: '{title} : {count} positions FSRS à revoir aujourd’hui. Série : {streak} jour(s).',
+                },
+                { title: rep.title, count: fsrsCount, streak },
+              ),
+              `daily-streak-${rep.id}-${today}`,
+            )
+            await updateRepertoireNotificationSettings(rep.id, { lastDailyReminderDayKey: today })
+            rep.lastDailyReminderDayKey = today
+          }
+        }
+
+        // 48h inactivity reminder (once/day/repertoire) when no recent training.
+        if (lastTrainDayKey && rep.lastInactivityReminderDayKey !== today && lastTrainDayKey !== today) {
+          const [y, mo, da] = lastTrainDayKey.split('-').map(Number)
+          const lastTrainApproxMs = new Date(y, mo - 1, da, 12, 0, 0, 0).getTime()
+          const elapsedHours = (Date.now() - lastTrainApproxMs) / (1000 * 60 * 60)
+          if (elapsedHours >= 48) {
+            await show(
+              t({ en: '48h without training', fr: '48h sans entraînement' }),
+              t(
+                {
+                  en: '{title}: it has been more than 48 hours since your last training run.',
+                  fr: '{title} : plus de 48h depuis ton dernier entraînement.',
+                },
+                { title: rep.title },
+              ),
+              `inactivity-48h-${rep.id}-${today}`,
+            )
+            await updateRepertoireNotificationSettings(rep.id, {
+              lastInactivityReminderDayKey: today,
+            })
+            rep.lastInactivityReminderDayKey = today
+          }
+        }
+      }
+    }
+
+    void runReminderCheck()
+    const intervalId = window.setInterval(() => {
+      void runReminderCheck()
+    }, 30 * 60 * 1000)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(intervalId)
+    }
+  }, [notificationsSupported, t])
 
   const refreshRepertoireOverview = useCallback(async () => {
     const reps = await listRepertoires()
@@ -717,6 +921,23 @@ export function BuildMode() {
         await goToRoot()
         return
       }
+      if (!playbackSettings.replayMoves) {
+        const nextPath: Move[] = []
+        let cur: Move | undefined = movesById.get(posId)
+        while (cur) {
+          nextPath.push(cur)
+          if (cur.parentId == null) break
+          cur = movesById.get(cur.parentId)
+        }
+        nextPath.reverse()
+        setPath(nextPath)
+        setCurrentNodeId(posId)
+        setSelectedChildIndex(0)
+        setRevealed(null)
+        await refreshChildren(activeRepertoireId, posId)
+        return
+      }
+
       setReplayingSequence(true)
       try {
         const nextPath: Move[] = []
@@ -733,14 +954,14 @@ export function BuildMode() {
         setSelectedChildIndex(0)
         setRevealed(null)
         await refreshChildren(activeRepertoireId, null)
-        await sleep(180)
+        await sleep(speedDelay.replayStart)
 
         for (let i = 0; i < nextPath.length; i += 1) {
           const partial = nextPath.slice(0, i + 1)
           const current = partial[partial.length - 1]!
           setPath(partial)
           setCurrentNodeId(current.id)
-          await sleep(240)
+          await sleep(speedDelay.replayStep)
         }
 
         await refreshChildren(activeRepertoireId, posId)
@@ -748,7 +969,7 @@ export function BuildMode() {
         setReplayingSequence(false)
       }
     },
-    [activeRepertoireId, goToRoot, movesById, refreshChildren],
+    [activeRepertoireId, goToRoot, movesById, playbackSettings.replayMoves, refreshChildren, speedDelay.replayStart, speedDelay.replayStep],
   )
 
   const suspendTrainRun = useCallback(() => {
@@ -970,7 +1191,7 @@ export function BuildMode() {
     async (options: { openingTags: string[]; difficulty?: PuzzleDifficulty }) => {
       const difficulty = options.difficulty ?? puzzleDifficulty
       if (options.openingTags.length === 0) {
-        setToast({ type: 'info', message: 'Aucune ouverture exploitable pour les puzzles.' })
+        setToast({ type: 'info', message: t({ en: 'No usable opening found for puzzles.', fr: 'Aucune ouverture exploitable pour les puzzles.' }) })
         return
       }
       setPuzzleLoading(true)
@@ -989,7 +1210,7 @@ export function BuildMode() {
         const unseenPrepared = allPrepared.filter((p) => !playedPuzzleIds.has(p.id))
         const prepared = unseenPrepared.length > 0 ? unseenPrepared : allPrepared
         if (prepared.length === 0) {
-          setToast({ type: 'info', message: 'Aucun puzzle trouvé pour ces critères.' })
+          setToast({ type: 'info', message: t({ en: 'No puzzle found for these criteria.', fr: 'Aucun puzzle trouvé pour ces critères.' }) })
           return
         }
         setPuzzleQueue(prepared)
@@ -1004,7 +1225,13 @@ export function BuildMode() {
         const msg = e instanceof Error ? e.message : String(e)
         setToast({
           type: 'error',
-          message: `Impossible de charger les puzzles (${msg}). Vérifie RLS/colonnes de puzzles_v2.`,
+          message: t(
+            {
+              en: 'Unable to load puzzles ({msg}). Check RLS/columns for puzzles_v2.',
+              fr: 'Impossible de charger les puzzles ({msg}). Vérifie RLS/colonnes de puzzles_v2.',
+            },
+            { msg },
+          ),
         })
       } finally {
         setPuzzleLoading(false)
@@ -1048,7 +1275,7 @@ export function BuildMode() {
 
       window.setTimeout(() => {
         if (!activatePuzzleAtIndex(targetIndex)) {
-          setToast({ type: 'info', message: 'Session puzzles terminée.' })
+          setToast({ type: 'info', message: t({ en: 'Puzzle session complete.', fr: 'Session puzzles terminée.' }) })
           setMode('build')
         }
       }, 450)
@@ -1367,7 +1594,7 @@ export function BuildMode() {
       await refreshRepertoireOverview()
     } catch (e) {
       if (isBoardMoveRejected(e)) throw e
-      setToast({ type: 'error', message: 'Erreur lors de la sauvegarde du coup.' })
+      setToast({ type: 'error', message: t({ en: 'Error while saving move.', fr: 'Erreur lors de la sauvegarde du coup.' }) })
       rejectBoardMove()
     } finally {
       boardInteractionInFlightRef.current = false
@@ -1523,7 +1750,7 @@ export function BuildMode() {
           setBusy(false)
         }
       })()
-    }, 250)
+    }, speedDelay.autoReply)
 
     return () => window.clearTimeout(t)
   }, [
@@ -1536,6 +1763,7 @@ export function BuildMode() {
     markExplored,
     mode,
     selectVariant,
+    speedDelay.autoReply,
     trainRunKind,
   ])
 
@@ -1553,7 +1781,7 @@ export function BuildMode() {
 
     const t = window.setTimeout(() => {
       void backtrackToNextUnexplored()
-    }, 1000)
+    }, speedDelay.nextLine)
     return () => window.clearTimeout(t)
   }, [
     activeRepertoire,
@@ -1564,6 +1792,7 @@ export function BuildMode() {
     currentNodeId,
     mode,
     path.length,
+    speedDelay.nextLine,
     trainRunKind,
   ])
 
@@ -1628,7 +1857,7 @@ export function BuildMode() {
       setMode('build')
       return true
     } catch {
-      setToast({ type: 'error', message: 'Impossible de créer le répertoire.' })
+      setToast({ type: 'error', message: t({ en: 'Unable to create repertoire.', fr: 'Impossible de créer le répertoire.' }) })
       return false
     } finally {
       setBusy(false)
@@ -1741,7 +1970,7 @@ export function BuildMode() {
       await refreshAllMoves(activeRepertoireId)
       await refreshRepertoireOverview()
     } catch {
-      setToast({ type: 'error', message: "Impossible d'enregistrer le commentaire." })
+      setToast({ type: 'error', message: t({ en: 'Unable to save comment.', fr: "Impossible d'enregistrer le commentaire." }) })
     } finally {
       setBusy(false)
     }
@@ -1772,10 +2001,10 @@ export function BuildMode() {
               </div>
               <div className="mt-3 flex flex-wrap gap-3">
                 <button type="button" className="counter mb-0 text-sm" onClick={() => setImportOpen(true)}>
-                  Importer un répertoire
+                  {t({ en: 'Import repertoire', fr: 'Importer un répertoire' })}
                 </button>
                 <button type="button" className="counter mb-0 text-sm" onClick={() => setCreateRepertoireOpen(true)}>
-                  Créer un répertoire
+                  {t({ en: 'Create repertoire', fr: 'Créer un répertoire' })}
                 </button>
               </div>
             </div>
@@ -1785,7 +2014,7 @@ export function BuildMode() {
           <div className="mt-6 rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-4 shadow-[var(--shadow)]">
             <div className="space-y-5">
               <HomeSection
-                title="Blanc"
+                title={t({ en: 'White', fr: 'Blanc' })}
                 sectionColorDot="white"
                 repertoires={whiteRepertoires}
                 repertoireCounts={repertoireCounts}
@@ -1800,7 +2029,7 @@ export function BuildMode() {
                 onDelete={(r) => setModal({ kind: 'confirmDeleteRepertoire', repertoire: r })}
               />
               <HomeSection
-                title="Noir"
+                title={t({ en: 'Black', fr: 'Noir' })}
                 sectionColorDot="black"
                 repertoires={blackRepertoires}
                 repertoireCounts={repertoireCounts}
@@ -1838,8 +2067,8 @@ export function BuildMode() {
                           ? 'border-[var(--border)] bg-white'
                           : 'border-neutral-700 bg-neutral-900 dark:border-neutral-600 dark:bg-neutral-950',
                       ].join(' ')}
-                      title={activeRepertoire.side === 'white' ? 'Blancs' : 'Noirs'}
-                      aria-label={activeRepertoire.side === 'white' ? 'Blancs' : 'Noirs'}
+                      title={activeRepertoire.side === 'white' ? t({ en: 'White', fr: 'Blancs' }) : t({ en: 'Black', fr: 'Noirs' })}
+                      aria-label={activeRepertoire.side === 'white' ? t({ en: 'White', fr: 'Blancs' }) : t({ en: 'Black', fr: 'Noirs' })}
                     />
                   ) : null}
                 </div>
@@ -1860,8 +2089,8 @@ export function BuildMode() {
                   <button
                     type="button"
                     className="train-accent-btn train-accent-btn--icon inline-flex items-center justify-center"
-                    aria-label="Paramètres de l'échiquier"
-                    title="Paramètres"
+                    aria-label={t({ en: 'Board settings', fr: "Paramètres de l'échiquier" })}
+                    title={t({ en: 'Settings', fr: 'Paramètres' })}
                     onClick={() => setSettingsOpen(true)}
                   >
                     <Settings className="h-[12.375px] w-[12.375px]" strokeWidth={2} aria-hidden />
@@ -1900,7 +2129,7 @@ export function BuildMode() {
                       ].join(' ')}
                       role="switch"
                       aria-checked={showBoardAnnotations}
-                      aria-label="Afficher les annotations sur l'échiquier"
+                      aria-label={t({ en: 'Show board annotations', fr: "Afficher les annotations sur l'échiquier" })}
                       onClick={() => setShowBoardAnnotations((v) => !v)}
                     >
                       <span className="toggle-thumb" />
@@ -1922,12 +2151,15 @@ export function BuildMode() {
                     {!replayingSequence ? (
                       <div className="font-mono text-[11px]">
                         {children.length === 0
-                          ? 'Fin de ligne'
+                          ? t({ en: 'End of line', fr: 'Fin de ligne' })
                           : isUsersTurn
                             ? expectedTrainRepliesList.length > 1
-                              ? `À toi · ${trainRepliesRemaining} réponse${trainRepliesRemaining > 1 ? 's' : ''} à trouver`
-                              : 'À toi'
-                            : 'Réponse…'}
+                              ? t(
+                                  { en: 'Your turn · {count} answer(s) to find', fr: 'À toi · {count} réponse(s) à trouver' },
+                                  { count: trainRepliesRemaining },
+                                )
+                              : t({ en: 'Your turn', fr: 'À toi' })
+                            : t({ en: 'Reply…', fr: 'Réponse…' })}
                       </div>
                     ) : null}
                     {trainRunActive ? (
@@ -1940,9 +2172,12 @@ export function BuildMode() {
                         </div>
                         <div className="mt-1 flex items-center justify-between gap-2 text-[10px] opacity-80">
                           <div>
-                            Restantes: {trainRemaining} · Passées: {trainPassed} · Failed: {trainFailed}
+                            {t(
+                              { en: 'Remaining: {remaining} · Passed: {passed} · Failed: {failed}', fr: 'Restantes: {remaining} · Passées: {passed} · Failed: {failed}' },
+                              { remaining: trainRemaining, passed: trainPassed, failed: trainFailed },
+                            )}
                           </div>
-                          <div className="font-mono">Profondeur = {path.length}</div>
+                          <div className="font-mono">{t({ en: 'Depth = {depth}', fr: 'Profondeur = {depth}' }, { depth: path.length })}</div>
                         </div>
                       </>
                     ) : null}
@@ -1996,18 +2231,18 @@ export function BuildMode() {
                     disabled={busy || replayingSequence}
                     onClick={() => suspendTrainRun()}
                   >
-                    Suspendre
+                    {t({ en: 'Suspend', fr: 'Suspendre' })}
                   </button>
                 </div>
 
                 {trainMissPulse ? (
                   <div className="mt-1.5 rounded border border-red-400/40 bg-red-500/10 px-2 py-1 text-left text-[10px] font-medium text-red-600 dark:text-red-300">
-                    Coup incorrect.
+                    {t({ en: 'Incorrect move.', fr: 'Coup incorrect.' })}
                   </div>
                 ) : null}
 
                 <div className="mt-1.5 text-left">
-                  <div className="text-[11px] font-medium text-[var(--text-h)]">Chemin</div>
+                  <div className="text-[11px] font-medium text-[var(--text-h)]">{t({ en: 'Path', fr: 'Chemin' })}</div>
                   <div className="mt-1 flex flex-wrap gap-1">
                     {path.length === 0 ? (
                       <span className="rounded bg-[var(--code-bg)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--text-h)]">
@@ -2029,7 +2264,7 @@ export function BuildMode() {
 
                 {hintStep > 0 ? (
                   <div className="mt-1.5 text-left text-[10px] opacity-80">
-                    {hintStep === 1 ? 'Hint: pièce à jouer' : 'Hint: case de destination'}
+                    {hintStep === 1 ? t({ en: 'Hint: piece to move', fr: 'Hint: pièce à jouer' }) : t({ en: 'Hint: destination square', fr: 'Hint: case de destination' })}
                   </div>
                 ) : null}
             </div>
@@ -2040,12 +2275,12 @@ export function BuildMode() {
               <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
                 <div className="min-w-0">
                   <div className="truncate text-xs font-medium text-[var(--text-h)]">
-                    {activeRepertoire?.title ?? '—'} · Puzzles
+                    {activeRepertoire?.title ?? '—'} · {t({ en: 'Puzzles', fr: 'Puzzles' })}
                   </div>
                   <div className="mt-0.5 text-[10px] opacity-80">
                     {activePuzzle
-                      ? `Puzzle ${puzzleIndex + 1}/${puzzleQueue.length} · ELO ${activePuzzle.rating}`
-                      : 'Aucun puzzle actif'}
+                      ? t({ en: 'Puzzle {index}/{total} · ELO {elo}', fr: 'Puzzle {index}/{total} · ELO {elo}' }, { index: puzzleIndex + 1, total: puzzleQueue.length, elo: activePuzzle.rating })
+                      : t({ en: 'No active puzzle', fr: 'Aucun puzzle actif' })}
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-0.5">
@@ -2058,8 +2293,8 @@ export function BuildMode() {
                   <button
                     type="button"
                     className="train-accent-btn train-accent-btn--icon inline-flex items-center justify-center"
-                    aria-label="Paramètres de l'échiquier"
-                    title="Paramètres"
+                    aria-label={t({ en: 'Board settings', fr: "Paramètres de l'échiquier" })}
+                    title={t({ en: 'Settings', fr: 'Paramètres' })}
                     onClick={() => setSettingsOpen(true)}
                   >
                     <Settings className="h-[12.375px] w-[12.375px]" strokeWidth={2} aria-hidden />
@@ -2101,7 +2336,7 @@ export function BuildMode() {
                     disabled={puzzleLoading}
                     onClick={() => reloadPuzzleQueueForDifficulty(level)}
                   >
-                    {level === 'easy' ? 'Facile' : level === 'medium' ? 'Moyen' : 'Difficile'}
+                    {level === 'easy' ? t({ en: 'Easy', fr: 'Facile' }) : level === 'medium' ? t({ en: 'Medium', fr: 'Moyen' }) : t({ en: 'Hard', fr: 'Difficile' })}
                   </button>
                 ))}
               </div>
@@ -2114,7 +2349,7 @@ export function BuildMode() {
                   disabled={!activePuzzle}
                 >
                   <SkipForward className="h-3 w-3" aria-hidden />
-                  Puzzle suivant
+                  {t({ en: 'Next puzzle', fr: 'Puzzle suivant' })}
                 </button>
                 <button
                   type="button"
@@ -2123,13 +2358,13 @@ export function BuildMode() {
                   disabled={!activePuzzle}
                 >
                   <Eye className="h-3 w-3" aria-hidden />
-                  Montrer le coup
+                  {t({ en: 'Show move', fr: 'Montrer le coup' })}
                 </button>
               </div>
 
               <div className="mt-2 flex flex-wrap items-center gap-1">
                 {puzzleResultEntries.length === 0 ? (
-                  <span className="text-[10px] opacity-70">Session en cours…</span>
+                  <span className="text-[10px] opacity-70">{t({ en: 'Session in progress…', fr: 'Session en cours…' })}</span>
                 ) : (
                   puzzleResultEntries.map((entry, i) => (
                     <button
@@ -2141,7 +2376,16 @@ export function BuildMode() {
                           ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-600'
                           : 'border-red-500/50 bg-red-500/10 text-red-600',
                       ].join(' ')}
-                      title={`${entry.result === 'pass' ? 'Réussi' : 'Raté'} · Revenir au puzzle #${entry.puzzleIndex + 1}`}
+                      title={t(
+                        {
+                          en: '{result} · Jump to puzzle #{index}',
+                          fr: '{result} · Revenir au puzzle #{index}',
+                        },
+                        {
+                          result: entry.result === 'pass' ? t({ en: 'Passed', fr: 'Réussi' }) : t({ en: 'Failed', fr: 'Raté' }),
+                          index: entry.puzzleIndex + 1,
+                        },
+                      )}
                       onClick={() => jumpToPuzzleFromHistory(entry.puzzleIndex)}
                     >
                       {entry.result === 'pass' ? (
@@ -2165,7 +2409,7 @@ export function BuildMode() {
               </div>
 
               <div className="mt-2 text-left text-[10px] opacity-80">
-                Ouvertures ciblées: {puzzleOpeningTags.slice(0, 5).join(', ') || '—'}
+                {t({ en: 'Target openings', fr: 'Ouvertures ciblées' })}: {puzzleOpeningTags.slice(0, 5).join(', ') || '—'}
                 {puzzleOpeningTags.length > 5 ? ` +${puzzleOpeningTags.length - 5}` : ''}
               </div>
             </div>
@@ -2199,8 +2443,8 @@ export function BuildMode() {
                           ? 'border-neutral-400 bg-white shadow-sm'
                           : 'border-neutral-800 bg-neutral-900 dark:border-neutral-600 dark:bg-neutral-950',
                       ].join(' ')}
-                      title={activeRepertoire.side === 'white' ? 'Blancs' : 'Noirs'}
-                      aria-label={activeRepertoire.side === 'white' ? 'Blancs' : 'Noirs'}
+                      title={activeRepertoire.side === 'white' ? t({ en: 'White', fr: 'Blancs' }) : t({ en: 'Black', fr: 'Noirs' })}
+                      aria-label={activeRepertoire.side === 'white' ? t({ en: 'White', fr: 'Blancs' }) : t({ en: 'Black', fr: 'Noirs' })}
                     />
                   ) : null}
                 </div>
@@ -2238,7 +2482,7 @@ export function BuildMode() {
                       })
                     }
                     disabled={!activeRepertoireId || trainPositions.length === 0}
-                    title="Puzzles liés au répertoire"
+                    title={t({ en: 'Puzzles linked to repertoire', fr: 'Puzzles liés au répertoire' })}
                   >
                     Puzzles
                   </button>
@@ -2247,9 +2491,12 @@ export function BuildMode() {
 
               {trainRunSuspended ? (
                 <div className="mt-4 rounded-md border border-[var(--border)] bg-[var(--accent-bg)] px-3 py-3 text-left text-sm text-[var(--text-h)]">
-                  <div className="text-xs font-medium opacity-80">Entraînement en pause</div>
+                  <div className="text-xs font-medium opacity-80">{t({ en: 'Training paused', fr: 'Entraînement en pause' })}</div>
                   <div className="mt-2 text-xs opacity-75">
-                    Passées: {trainPassed} / {trainTotal} · Restantes: {trainRemaining} · Échecs: {trainFailed}
+                    {t(
+                      { en: 'Passed: {passed}/{total} · Remaining: {remaining} · Fails: {failed}', fr: 'Passées: {passed} / {total} · Restantes: {remaining} · Échecs: {failed}' },
+                      { passed: trainPassed, total: trainTotal, remaining: trainRemaining, failed: trainFailed },
+                    )}
                   </div>
                   <button
                     type="button"
@@ -2257,7 +2504,7 @@ export function BuildMode() {
                     disabled={busy || replayingSequence}
                     onClick={() => void resumeTrainRun()}
                   >
-                    {"Reprendre l'entraînement"}
+                    {t({ en: 'Resume training', fr: "Reprendre l'entraînement" })}
                   </button>
                 </div>
               ) : null}
@@ -2273,14 +2520,14 @@ export function BuildMode() {
 
               {mode === 'build' && selectedMove ? (
                 <div className="mt-4 rounded-md border border-[var(--border)] bg-[var(--bg)] p-3 text-left text-sm">
-                  <div className="text-xs font-medium text-[var(--text-h)]">Coup</div>
+                  <div className="text-xs font-medium text-[var(--text-h)]">{t({ en: 'Move', fr: 'Coup' })}</div>
                   <div className="mt-1 font-mono text-[var(--text-h)]">
                     {selectedMove.notation}
                     {formatNagForInline(selectedMove.nag)}
                   </div>
 
                   <label className="mt-3 block text-xs font-medium text-[var(--text-h)]" htmlFor="nagSelect">
-                    Annotation PGN
+                    {t({ en: 'PGN annotation', fr: 'Annotation PGN' })}
                   </label>
                   <select
                     id="nagSelect"
@@ -2289,7 +2536,7 @@ export function BuildMode() {
                     onChange={(e) => setMoveNagDraft(e.target.value)}
                     disabled={busy}
                   >
-                    <option value="">(aucune)</option>
+                    <option value="">{t({ en: '(none)', fr: '(aucune)' })}</option>
                     <option value="!">!</option>
                     <option value="?">?</option>
                     <option value="!!">!!</option>
@@ -2308,7 +2555,7 @@ export function BuildMode() {
                     className="mt-3 block text-xs font-medium text-[var(--text-h)]"
                     htmlFor="commentInput"
                   >
-                    Commentaire
+                    {t({ en: 'Comment', fr: 'Commentaire' })}
                   </label>
                   <textarea
                     id="commentInput"
@@ -2323,7 +2570,7 @@ export function BuildMode() {
                     {selectedMove.isMainLine ? (
                       <span className="text-xs font-medium text-[var(--accent)]">Ligne principale</span>
                     ) : (
-                      <span className="text-xs opacity-60">Variante</span>
+                      <span className="text-xs opacity-60">{t({ en: 'Variation', fr: 'Variante' })}</span>
                     )}
                     {(() => {
                       const sibs = allMoves.filter((m) => m.parentId === selectedMove.parentId)
@@ -2349,7 +2596,7 @@ export function BuildMode() {
                                   await refreshRepertoireOverview()
                                 }
                               } catch {
-                                setToast({ type: 'error', message: 'Impossible de définir la ligne principale.' })
+                                setToast({ type: 'error', message: t({ en: 'Unable to set main line.', fr: 'Impossible de définir la ligne principale.' }) })
                               } finally {
                                 setBusy(false)
                               }
@@ -2463,8 +2710,8 @@ export function BuildMode() {
                     <button
                       type="button"
                       className="counter mb-0 inline-flex h-7 w-7 flex-shrink-0 items-center justify-center !p-0 leading-none"
-                      aria-label="Paramètres de l'échiquier"
-                      title="Paramètres"
+                      aria-label={t({ en: 'Board settings', fr: "Paramètres de l'échiquier" })}
+                      title={t({ en: 'Settings', fr: 'Paramètres' })}
                       onClick={() => setSettingsOpen(true)}
                     >
                       <Settings className="h-[18px] w-[18px]" strokeWidth={2} aria-hidden />
@@ -2540,7 +2787,7 @@ export function BuildMode() {
                   onClick={() => setMobileBuildTab('tree')}
                 >
                   <ListTree className="h-5 w-5" strokeWidth={2} aria-hidden />
-                  Arbre
+                  {t({ en: 'Tree', fr: 'Arbre' })}
                 </button>
                 <button
                   type="button"
@@ -2555,7 +2802,7 @@ export function BuildMode() {
                   onClick={() => setMobileBuildTab('board')}
                 >
                   <LayoutGrid className="h-5 w-5" strokeWidth={2} aria-hidden />
-                  Échiquier
+                  {t({ en: 'Board', fr: 'Échiquier' })}
                 </button>
               </nav>
             ) : null}
@@ -2566,12 +2813,12 @@ export function BuildMode() {
 
       {modal?.kind === 'puzzleStart' ? (
         <ModalFrame
-          title="Puzzles liés au répertoire"
+          title={t({ en: 'Puzzles linked to repertoire', fr: 'Puzzles liés au répertoire' })}
           onClose={() => setModal(null)}
           actions={
             <div className="flex gap-2">
               <button type="button" className="counter" onClick={() => setModal(null)}>
-                Annuler
+                {t({ en: 'Cancel', fr: 'Annuler' })}
               </button>
               <button
                 type="button"
@@ -2583,16 +2830,36 @@ export function BuildMode() {
                   })
                 }
               >
-                Démarrer
+                {t({ en: 'Start', fr: 'Démarrer' })}
               </button>
             </div>
           }
         >
           <div className="space-y-3 text-sm">
+            <div>
+              <div className="mb-1 text-[10px] font-medium uppercase tracking-wide opacity-70">
+                {t({ en: 'Current position preview', fr: 'Aperçu de la position actuelle' })}
+              </div>
+              <div className="mx-auto w-full max-w-[210px]">
+                <Board
+                  fen={currentFen}
+                  dests={new Map()}
+                  showDests={false}
+                  turnColor={puzzleStartPreviewTurnColor}
+                  orientation={boardOrientation}
+                  drawableEnabled={false}
+                  drawableVisible={false}
+                  shapes={[]}
+                  annotationAutoShapes={[]}
+                  annotationMode={false}
+                  touchMoveMode={device.isMobile}
+                />
+              </div>
+            </div>
             <div className="rounded border border-[var(--border)] bg-[var(--bg)] p-2 text-xs">
-              <div className="mb-1 text-[10px] font-medium uppercase tracking-wide opacity-70">Ouvertures détectées</div>
+              <div className="mb-1 text-[10px] font-medium uppercase tracking-wide opacity-70">{t({ en: 'Detected openings', fr: 'Ouvertures détectées' })}</div>
               {puzzleStartTagsDraft.length === 0 ? (
-                <div className="opacity-70">{puzzleLoading ? 'Analyse…' : 'Aucun tag détecté.'}</div>
+                <div className="opacity-70">{puzzleLoading ? t({ en: 'Analyzing…', fr: 'Analyse…' }) : t({ en: 'No tag detected.', fr: 'Aucun tag détecté.' })}</div>
               ) : (
                 <div className="flex flex-wrap gap-1">
                   {puzzleStartTagsDraft
@@ -2610,23 +2877,19 @@ export function BuildMode() {
               )}
             </div>
 
-            <div className="rounded border border-[var(--border)] bg-[var(--bg)] px-2 py-2 text-xs">
-              Portée: <span className="font-medium text-[var(--text-h)]">Variante actuelle</span>
-            </div>
-
             {!modal.hasSelection ? (
               <div className="text-xs opacity-80">
-                Sélectionne une position dans l'arbre avant de lancer les puzzles.
+                {t({ en: 'Select a position in the tree before launching puzzles.', fr: "Sélectionne une position dans l'arbre avant de lancer les puzzles." })}
               </div>
             ) : null}
-            {puzzleLoading ? <div className="text-xs opacity-80">Analyse des ouvertures…</div> : null}
+            {puzzleLoading ? <div className="text-xs opacity-80">{t({ en: 'Opening analysis…', fr: 'Analyse des ouvertures…' })}</div> : null}
           </div>
         </ModalFrame>
       ) : null}
 
       {modal?.kind === 'trainStart' ? (
         <ModalFrame
-          title="Démarrer un entraînement"
+          title={t({ en: 'Start training', fr: 'Démarrer un entraînement' })}
           onClose={() => setModal(null)}
           actions={
             <div className="flex flex-wrap justify-end gap-2">
@@ -2639,7 +2902,7 @@ export function BuildMode() {
                   void startTrainRun({ kind: 'full' })
                 }}
               >
-                Tout le répertoire
+                {t({ en: 'Full repertoire', fr: 'Tout le répertoire' })}
               </button>
               <button
                 type="button"
@@ -2654,7 +2917,7 @@ export function BuildMode() {
                   })
                 }}
               >
-                Variante sélectionnée
+                {t({ en: 'Selected variation', fr: 'Variante sélectionnée' })}
               </button>
               <button
                 type="button"
@@ -2671,7 +2934,7 @@ export function BuildMode() {
                   setRandomCountDraft(Math.min(10, modal.fullCount))
                 }}
               >
-                Positions aléatoires
+                {t({ en: 'Random positions', fr: 'Positions aléatoires' })}
               </button>
               <button
                 type="button"
@@ -2686,7 +2949,7 @@ export function BuildMode() {
                   void (async () => {
                     const q = await buildFsrsTrainQueue(activeRepertoireId, trainPositions)
                     if (q.length === 0) {
-                      setToast({ type: 'info', message: 'Aucune position dans la file FSRS pour le moment.' })
+                      setToast({ type: 'info', message: t({ en: 'No position in FSRS queue for now.', fr: 'Aucune position dans la file FSRS pour le moment.' }) })
                       return
                     }
                     setModal(null)
@@ -2706,28 +2969,30 @@ export function BuildMode() {
         >
           <div className="space-y-2 text-sm">
             <div>
-              Répertoire complet: <span className="font-mono">{modal.fullCount}</span> positions.
+              {t({ en: 'Full repertoire', fr: 'Répertoire complet' })}: <span className="font-mono">{modal.fullCount}</span> {t({ en: 'positions', fr: 'positions' })}.
             </div>
             <div>
-              Variante sélectionnée: <span className="font-mono">{modal.selectionCount}</span> positions.
+              {t({ en: 'Selected variation', fr: 'Variante sélectionnée' })}: <span className="font-mono">{modal.selectionCount}</span> {t({ en: 'positions', fr: 'positions' })}.
             </div>
             <div className="text-[var(--text)] opacity-90">
-              <span className="font-medium text-[var(--text-h)]">FSRS</span> : positions dues + nouvelles positions
-              chaque jour (quota qui augmente jour après jour). Algorithme{' '}
+              <span className="font-medium text-[var(--text-h)]">FSRS</span> : {t({
+                en: 'due positions + new positions every day (quota increases day by day). Algorithm',
+                fr: 'positions dues + nouvelles positions chaque jour (quota qui augmente jour après jour). Algorithme',
+              })}{' '}
               <span className="font-mono text-[11px]">ts-fsrs</span>.
             </div>
           </div>
           {!modal.hasSelection ? (
             <div className="mt-2 text-sm opacity-80">
-              Sélectionne un coup dans l'arbre pour entraîner uniquement cette variante.
+              {t({ en: 'Select a move in the tree to train only this variation.', fr: "Sélectionne un coup dans l'arbre pour entraîner uniquement cette variante." })}
             </div>
           ) : null}
           {modal.fullCount === 0 ? (
-            <div className="mt-2 text-sm opacity-80">Aucune position entraînable trouvée.</div>
+            <div className="mt-2 text-sm opacity-80">{t({ en: 'No trainable position found.', fr: 'Aucune position entraînable trouvée.' })}</div>
           ) : null}
 
           <div className="mt-4 flex items-center justify-between gap-3 border-t border-[var(--border)] pt-3">
-            <span className="text-[var(--text-h)]">Entraîner la ligne principale seulement (ta couleur)</span>
+            <span className="text-[var(--text-h)]">{t({ en: 'Train main line only (your color)', fr: 'Entraîner la ligne principale seulement (ta couleur)' })}</span>
             <button
               type="button"
               className={['toggle-switch', trainMainLineOnly ? 'is-on' : ''].join(' ')}
@@ -2743,12 +3008,12 @@ export function BuildMode() {
 
       {modal?.kind === 'trainRandomConfig' ? (
         <ModalFrame
-          title="Positions aléatoires"
+          title={t({ en: 'Random positions', fr: 'Positions aléatoires' })}
           onClose={() => setModal(null)}
           actions={
             <div className="flex gap-2">
               <button type="button" className="counter" onClick={() => setModal(null)}>
-                Annuler
+                {t({ en: 'Cancel', fr: 'Annuler' })}
               </button>
               <button
                 type="button"
@@ -2764,14 +3029,14 @@ export function BuildMode() {
                   void startRandomTrainRun({ count: n, scopeSelection: randomScopeSelected })
                 }}
               >
-                Démarrer
+                {t({ en: 'Start', fr: 'Démarrer' })}
               </button>
             </div>
           }
         >
           <div className="space-y-3 text-sm">
             <div>
-              Nombre de positions (max{' '}
+              {t({ en: 'Number of positions (max', fr: 'Nombre de positions (max' })}{' '}
               <span className="font-mono">{randomScopeSelected ? modal.selectionMaxCount : modal.maxCount}</span>)
             </div>
             <input
@@ -2784,7 +3049,7 @@ export function BuildMode() {
             />
 
             <div className="flex items-center justify-between gap-3">
-              <span className="text-[var(--text-h)]">Se concentrer sur la variante sélectionnée</span>
+              <span className="text-[var(--text-h)]">{t({ en: 'Focus on selected variation', fr: 'Se concentrer sur la variante sélectionnée' })}</span>
               <button
                 type="button"
                 className={`toggle-switch ${randomScopeSelected ? 'is-on' : ''}`}
@@ -2795,17 +3060,17 @@ export function BuildMode() {
                   if (!modal.hasSelection) return
                   setRandomScopeSelected((v) => !v)
                 }}
-                title={!modal.hasSelection ? 'Sélectionne un coup dans l’arbre pour activer.' : ''}
+                title={!modal.hasSelection ? t({ en: 'Select a move in tree to enable.', fr: 'Sélectionne un coup dans l’arbre pour activer.' }) : ''}
               >
                 <span className="toggle-thumb" />
               </button>
             </div>
             {!modal.hasSelection ? (
-              <div className="text-xs opacity-80">Sélectionne un coup dans l’arbre pour activer ce mode.</div>
+              <div className="text-xs opacity-80">{t({ en: 'Select a move in tree to enable this mode.', fr: 'Sélectionne un coup dans l’arbre pour activer ce mode.' })}</div>
             ) : null}
 
             <div className="flex items-center justify-between gap-3 border-t border-[var(--border)] pt-3">
-              <span className="text-[var(--text-h)]">Entraîner la ligne principale seulement (ta couleur)</span>
+              <span className="text-[var(--text-h)]">{t({ en: 'Train main line only (your color)', fr: 'Entraîner la ligne principale seulement (ta couleur)' })}</span>
               <button
                 type="button"
                 className={['toggle-switch', trainMainLineOnly ? 'is-on' : ''].join(' ')}
@@ -2822,7 +3087,7 @@ export function BuildMode() {
 
       {modal?.kind === 'trainSummary' ? (
         <ModalFrame
-          title="Résumé du run"
+          title={t({ en: 'Run summary', fr: 'Résumé du run' })}
           onClose={() => setModal(null)}
           actions={
             <div className="flex gap-2">
@@ -2836,7 +3101,7 @@ export function BuildMode() {
                   void startTrainRun({ kind: 'failed', positions: modal.failedPositions })
                 }}
               >
-                Rejouer les échouées
+                {t({ en: 'Replay failed', fr: 'Rejouer les échouées' })}
               </button>
               <button
                 type="button"
@@ -2861,12 +3126,12 @@ export function BuildMode() {
 
       {modal?.kind === 'confirmDeleteRepertoire' ? (
         <ModalFrame
-          title="Supprimer le répertoire"
+          title={t({ en: 'Delete repertoire', fr: 'Supprimer le répertoire' })}
           onClose={() => setModal(null)}
           actions={
             <div className="flex gap-2">
               <button type="button" className="counter" onClick={() => setModal(null)}>
-                Annuler
+                {t({ en: 'Cancel', fr: 'Annuler' })}
               </button>
               <button
                 type="button"
@@ -2888,33 +3153,33 @@ export function BuildMode() {
                       if (shareTarget?.id === rep.id) setShareTarget(null)
                       if (renameTarget?.id === rep.id) setRenameTarget(null)
                     } catch {
-                      setToast({ type: 'error', message: 'Impossible de supprimer ce répertoire.' })
+                      setToast({ type: 'error', message: t({ en: 'Unable to delete this repertoire.', fr: 'Impossible de supprimer ce répertoire.' }) })
                     } finally {
                       setBusy(false)
                     }
                   })()
                 }}
               >
-                Supprimer
+                {t({ en: 'Delete', fr: 'Supprimer' })}
               </button>
             </div>
           }
         >
           <div className="text-sm">
-            Supprimer définitivement <span className="font-medium">{modal.repertoire.title}</span> et toutes ses
-            positions ?
+            {t({ en: 'Delete permanently', fr: 'Supprimer définitivement' })}{' '}
+            <span className="font-medium">{modal.repertoire.title}</span> {t({ en: 'and all its positions?', fr: 'et toutes ses positions ?' })}
           </div>
         </ModalFrame>
       ) : null}
 
       {modal?.kind === 'confirmDeleteMove' ? (
         <ModalFrame
-          title="Confirmer la suppression"
+          title={t({ en: 'Confirm delete', fr: 'Confirmer la suppression' })}
           onClose={() => setModal(null)}
           actions={
             <div className="flex gap-2">
               <button type="button" className="counter" onClick={() => setModal(null)}>
-                Annuler
+                {t({ en: 'Cancel', fr: 'Annuler' })}
               </button>
               <button
                 type="button"
@@ -2944,45 +3209,46 @@ export function BuildMode() {
                         await refreshChildren(activeRepertoireId, currentNodeId)
                       }
                     } catch {
-                      setToast({ type: 'error', message: 'Impossible de supprimer cette variante.' })
+                      setToast({ type: 'error', message: t({ en: 'Unable to delete this variation.', fr: 'Impossible de supprimer cette variante.' }) })
                     } finally {
                       setBusy(false)
                     }
                   })()
                 }}
               >
-                Supprimer
+                {t({ en: 'Delete', fr: 'Supprimer' })}
               </button>
             </div>
           }
         >
           <div className="text-sm">
-            Supprimer <span className="font-mono">{modal.move.notation}</span> et toute sa sous-variante ?
+            {t({ en: 'Delete', fr: 'Supprimer' })} <span className="font-mono">{modal.move.notation}</span>{' '}
+            {t({ en: 'and all its sub-variation?', fr: 'et toute sa sous-variante ?' })}
           </div>
         </ModalFrame>
       ) : null}
 
       {renameTarget ? (
         <ModalFrame
-          title="Renommer le répertoire"
+          title={t({ en: 'Rename repertoire', fr: 'Renommer le répertoire' })}
           onClose={() => setRenameTarget(null)}
           actions={
             <div className="flex gap-2">
               <button type="button" className="counter" onClick={() => setRenameTarget(null)}>
-                Annuler
+                {t({ en: 'Cancel', fr: 'Annuler' })}
               </button>
               <button
                 type="button"
                 className="counter"
                 disabled={!renameDraft.trim()}
                 onClick={() => {
-                  const t = renameDraft.trim().slice(0, 80)
-                  if (!t || !renameTarget) return
+                  const nextTitle = renameDraft.trim().slice(0, 80)
+                  if (!nextTitle || !renameTarget) return
                   void (async () => {
                     setBusy(true)
                     setToast(null)
                     try {
-                      await updateRepertoireTitle(renameTarget.id, t)
+                      await updateRepertoireTitle(renameTarget.id, nextTitle)
                       await refreshRepertoireOverview()
                       if (activeRepertoireId === renameTarget.id) {
                         const rep = await getRepertoire(renameTarget.id)
@@ -2990,20 +3256,20 @@ export function BuildMode() {
                       }
                       setRenameTarget(null)
                     } catch {
-                      setToast({ type: 'error', message: 'Impossible de renommer le répertoire.' })
+                      setToast({ type: 'error', message: t({ en: 'Unable to rename repertoire.', fr: 'Impossible de renommer le répertoire.' }) })
                     } finally {
                       setBusy(false)
                     }
                   })()
                 }}
               >
-                Enregistrer
+                {t({ en: 'Save', fr: 'Enregistrer' })}
               </button>
             </div>
           }
         >
           <label className="block text-sm text-[var(--text-h)]" htmlFor="rename-rep-title">
-            Nom
+            {t({ en: 'Name', fr: 'Nom' })}
           </label>
           <input
             id="rename-rep-title"
@@ -3023,11 +3289,22 @@ export function BuildMode() {
           showDests={showDests}
           showBoardAnnotations={showBoardAnnotations}
           showAnnotationsToggle={mode === 'build'}
+          animationSpeed={playbackSettings.animationSpeed}
+          replayMoves={playbackSettings.replayMoves}
+          soundOn={playbackSettings.soundOn}
+          notificationsEnabled={activeRepertoire?.notificationsEnabled === true}
+          notificationsSupported={notificationsSupported}
+          visualTheme={visualTheme}
           onClose={() => setSettingsOpen(false)}
           onCopyFen={() => void navigator.clipboard.writeText(currentFen)}
           onToggleFlip={() => setFlipBoard((v) => !v)}
           onToggleDests={() => setShowDests((v) => !v)}
           onToggleAnnotations={() => setShowBoardAnnotations((v) => !v)}
+          onChangeAnimationSpeed={(animationSpeed) => setPlaybackSettings((prev) => ({ ...prev, animationSpeed }))}
+          onToggleReplayMoves={() => setPlaybackSettings((prev) => ({ ...prev, replayMoves: !prev.replayMoves }))}
+          onToggleSound={() => setPlaybackSettings((prev) => ({ ...prev, soundOn: !prev.soundOn }))}
+          onToggleNotifications={toggleRepertoireNotifications}
+          onChangeVisualTheme={(nextTheme) => setVisualTheme(nextTheme)}
         />
       ) : null}
 
@@ -3056,6 +3333,7 @@ export function BuildMode() {
       />
       <ShareRepertoireModal
         open={shareTarget != null}
+        repertoireId={shareTarget?.id ?? ''}
         repertoireTitle={shareTarget?.title ?? ''}
         onClose={() => setShareTarget(null)}
       />
@@ -3074,6 +3352,7 @@ function ModalFrame({
   actions: React.ReactNode
   onClose: () => void
 }) {
+  const { t } = useI18n()
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
@@ -3087,7 +3366,7 @@ function ModalFrame({
             type="button"
             className="rounded px-2 py-1 text-sm hover:bg-[var(--accent-bg)]"
             onClick={onClose}
-            aria-label="Fermer"
+            aria-label={t({ en: 'Close', fr: 'Fermer' })}
           >
             ✕
           </button>
@@ -3100,21 +3379,22 @@ function ModalFrame({
 }
 
 function SummaryBlock({ total, passed, failed }: { total: number; passed: number; failed: number }) {
+  const { t } = useI18n()
   const played = total
   const success = Math.max(0, total - failed)
   const pct = total === 0 ? 0 : Math.round((success / total) * 100)
   return (
     <div className="grid grid-cols-2 gap-3 text-sm">
       <div className="rounded-md border border-[var(--border)] p-3">
-        <div className="opacity-80">Positions jouées</div>
+        <div className="opacity-80">{t({ en: 'Positions played', fr: 'Positions jouées' })}</div>
         <div className="mt-1 font-mono text-[var(--text-h)]">{played}</div>
       </div>
       <div className="rounded-md border border-[var(--border)] p-3">
-        <div className="opacity-80">Réussite</div>
+        <div className="opacity-80">{t({ en: 'Success', fr: 'Réussite' })}</div>
         <div className="mt-1 font-mono text-[var(--text-h)]">{pct}%</div>
       </div>
       <div className="rounded-md border border-[var(--border)] p-3">
-        <div className="opacity-80">Passées</div>
+        <div className="opacity-80">{t({ en: 'Passed', fr: 'Passées' })}</div>
         <div className="mt-1 font-mono text-[var(--text-h)]">{passed}</div>
       </div>
       <div className="rounded-md border border-[var(--border)] p-3">
@@ -3126,6 +3406,7 @@ function SummaryBlock({ total, passed, failed }: { total: number; passed: number
 }
 
 function PuzzleSessionTimer({ startedAtMs, averageMs }: { startedAtMs: number | null; averageMs: number }) {
+  const { t } = useI18n()
   const [nowMs, setNowMs] = useState(() => Date.now())
 
   useEffect(() => {
@@ -3137,9 +3418,9 @@ function PuzzleSessionTimer({ startedAtMs, averageMs }: { startedAtMs: number | 
   const elapsed = startedAtMs == null ? 0 : Math.max(0, nowMs - startedAtMs)
   return (
     <div className="mt-1.5 text-left text-[10px] opacity-80">
-      Temps puzzle: <span className="font-mono">{formatDurationMs(elapsed)}</span>
+      {t({ en: 'Puzzle time', fr: 'Temps puzzle' })}: <span className="font-mono">{formatDurationMs(elapsed)}</span>
       <span className="mx-1.5">·</span>
-      Moyenne session: <span className="font-mono">{formatDurationMs(averageMs)}</span>
+      {t({ en: 'Session average', fr: 'Moyenne session' })}: <span className="font-mono">{formatDurationMs(averageMs)}</span>
     </div>
   )
 }
@@ -3150,35 +3431,129 @@ function SettingsPopup({
   showDests,
   showBoardAnnotations,
   showAnnotationsToggle,
+  animationSpeed,
+  replayMoves,
+  soundOn,
+  notificationsEnabled,
+  notificationsSupported,
+  visualTheme,
   onClose,
   onCopyFen,
   onToggleFlip,
   onToggleDests,
   onToggleAnnotations,
+  onChangeAnimationSpeed,
+  onToggleReplayMoves,
+  onToggleSound,
+  onToggleNotifications,
+  onChangeVisualTheme,
 }: {
   fen: string
   flipBoard: boolean
   showDests: boolean
   showBoardAnnotations: boolean
   showAnnotationsToggle: boolean
+  animationSpeed: AnimationSpeed
+  replayMoves: boolean
+  soundOn: boolean
+  notificationsEnabled: boolean
+  notificationsSupported: boolean
+  visualTheme: VisualTheme
   onClose: () => void
   onCopyFen: () => void
   onToggleFlip: () => void
   onToggleDests: () => void
   onToggleAnnotations: () => void
+  onChangeAnimationSpeed: (speed: AnimationSpeed) => void
+  onToggleReplayMoves: () => void
+  onToggleSound: () => void
+  onToggleNotifications: () => void
+  onChangeVisualTheme: (theme: VisualTheme) => void
 }) {
+  const { t } = useI18n()
   return (
     <ModalFrame
-      title="Paramètres"
+      title={t({ en: 'Settings', fr: 'Paramètres' })}
       onClose={onClose}
       actions={<button type="button" className="counter" onClick={onClose}>OK</button>}
     >
       <div className="space-y-4 text-left text-sm">
-        <ToggleRow label="Inverser l'échiquier" checked={flipBoard} onChange={onToggleFlip} />
-        <ToggleRow label="Afficher les destinations" checked={showDests} onChange={onToggleDests} />
+        <ToggleRow label={t({ en: 'Flip board', fr: "Inverser l'échiquier" })} checked={flipBoard} onChange={onToggleFlip} />
+        <ToggleRow label={t({ en: 'Show destinations', fr: 'Afficher les destinations' })} checked={showDests} onChange={onToggleDests} />
+        <div className="space-y-2">
+          <div className="text-[var(--text-h)]">{t({ en: 'Animation speed', fr: "Vitesse d'animation" })}</div>
+          <div className="flex flex-wrap gap-1.5">
+            {(
+              [
+                ['very_fast', t({ en: 'Very fast', fr: 'Très rapide' })],
+                ['fast', t({ en: 'Fast', fr: 'Rapide' })],
+                ['medium', t({ en: 'Medium', fr: 'Moyenne' })],
+                ['slow', t({ en: 'Slow', fr: 'Lente' })],
+              ] as const
+            ).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                className={[
+                  'rounded border px-2 py-1 text-xs transition-colors',
+                  animationSpeed === id
+                    ? 'border-[var(--accent-border)] bg-[var(--accent-bg)] text-[var(--accent)]'
+                    : 'border-[var(--border)] bg-[var(--bg)] text-[var(--text)] hover:bg-[var(--code-bg)]',
+                ].join(' ')}
+                onClick={() => onChangeAnimationSpeed(id)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="space-y-2">
+          <div className="text-[var(--text-h)]">{t({ en: 'Visual theme', fr: 'Thème visuel' })}</div>
+          <div className="flex flex-wrap gap-1.5">
+            {(
+              [
+                ['violet', t({ en: 'Violet (default)', fr: 'Violet (défaut)' })],
+                ['acid_blue', t({ en: 'Acid blue', fr: 'Bleu acide' })],
+                ['dark_contrast', t({ en: 'High-contrast dark', fr: 'Sombre contrasté' })],
+              ] as const
+            ).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                className={[
+                  'rounded border px-2 py-1 text-xs transition-colors',
+                  visualTheme === id
+                    ? 'border-[var(--accent-border)] bg-[var(--accent-bg)] text-[var(--accent)]'
+                    : 'border-[var(--border)] bg-[var(--bg)] text-[var(--text)] hover:bg-[var(--code-bg)]',
+                ].join(' ')}
+                onClick={() => onChangeVisualTheme(id)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <ToggleRow label={t({ en: 'Replay moves', fr: 'Rejouer les coups' })} checked={replayMoves} onChange={onToggleReplayMoves} />
+        <ToggleRow label={t({ en: 'Sound on / off', fr: 'Son on / off' })} checked={soundOn} onChange={onToggleSound} />
+        <ToggleRow
+          label={t({ en: 'Daily reminders (FSRS + 48h)', fr: 'Rappels quotidiens (FSRS + 48h)' })}
+          checked={notificationsEnabled}
+          onChange={onToggleNotifications}
+          disabled={!notificationsSupported}
+        />
+        {!notificationsSupported ? (
+          <div className="text-xs opacity-75">
+            {t(
+              {
+                en: 'Notifications are not supported on this device/browser.',
+                fr: 'Les notifications ne sont pas supportées sur cet appareil/navigateur.',
+              },
+            )}
+          </div>
+        ) : null}
         {showAnnotationsToggle ? (
           <ToggleRow
-            label="Afficher annotations"
+            label={t({ en: 'Show annotations', fr: 'Afficher annotations' })}
             checked={showBoardAnnotations}
             onChange={onToggleAnnotations}
           />
@@ -3187,7 +3562,7 @@ function SettingsPopup({
           <div className="mb-1 flex items-center justify-between gap-2">
             <span className="text-[var(--text-h)]">FEN</span>
             <button type="button" className="counter text-xs" onClick={onCopyFen}>
-              Copy FEN
+              {t({ en: 'Copy FEN', fr: 'Copier FEN' })}
             </button>
           </div>
           <div className="break-all rounded-md bg-[var(--code-bg)] px-3 py-2 font-mono text-sm text-[var(--text-h)]">
@@ -3203,10 +3578,12 @@ function ToggleRow({
   label,
   checked,
   onChange,
+  disabled = false,
 }: {
   label: string
   checked: boolean
   onChange: () => void
+  disabled?: boolean
 }) {
   return (
     <div className="flex items-center justify-between gap-3">
@@ -3216,6 +3593,7 @@ function ToggleRow({
         className={`toggle-switch ${checked ? 'is-on' : ''}`}
         role="switch"
         aria-checked={checked}
+        disabled={disabled}
         onClick={onChange}
       >
         <span className="toggle-thumb" />
@@ -3245,6 +3623,7 @@ function HomeSection({
   onRename: (repertoire: Repertoire) => void
   onDelete: (repertoire: Repertoire) => void
 }) {
+  const { t } = useI18n()
   return (
     <section>
       <div className="flex items-center gap-2 text-sm font-medium text-[var(--text-h)]">
@@ -3261,7 +3640,7 @@ function HomeSection({
       </div>
       <div className="mt-3 space-y-2">
         {repertoires.length === 0 ? (
-          <div className="text-sm opacity-80">Aucun répertoire.</div>
+          <div className="text-sm opacity-80">{t({ en: 'No repertoire.', fr: 'Aucun répertoire.' })}</div>
         ) : (
           repertoires.map((r) => (
             <div
@@ -3269,21 +3648,24 @@ function HomeSection({
               className="flex min-w-0 items-stretch gap-0 overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg)] hover:shadow-[var(--shadow)]"
             >
               {/* 1 — titre + sous-titre (prend l’espace horizontal disponible) */}
-              <div className="flex min-w-0 flex-1 flex-col px-3 py-2 text-left">
-                <button
-                  type="button"
-                  className="min-w-0 truncate text-left text-sm font-medium text-[var(--text-h)]"
-                  onClick={() => onOpen(r.id)}
-                >
+              <div
+                className="flex min-w-0 flex-1 cursor-pointer flex-col px-3 py-2 text-left"
+                role="button"
+                tabIndex={0}
+                onClick={() => onOpen(r.id)}
+                onKeyDown={(e) => {
+                  if (e.key !== 'Enter' && e.key !== ' ') return
+                  e.preventDefault()
+                  onOpen(r.id)
+                }}
+                aria-label={t({ en: 'Open {title}', fr: 'Ouvrir {title}' }, { title: r.title })}
+              >
+                <div className="min-w-0 truncate text-left text-sm font-medium text-[var(--text-h)]">
                   {r.title}
-                </button>
-                <button
-                  type="button"
-                  className="mt-0.5 w-full text-left text-xs opacity-80 hover:opacity-100"
-                  onClick={() => onOpen(r.id)}
-                >
-                  {repertoireCounts[r.id] ?? 0} positions enregistrées
-                </button>
+                </div>
+                <div className="mt-0.5 w-full text-left text-xs opacity-80 hover:opacity-100">
+                  {t({ en: '{count} saved positions', fr: '{count} positions enregistrées' }, { count: repertoireCounts[r.id] ?? 0 })}
+                </div>
               </div>
               {/* 2 — flamme seule, centrée verticalement */}
               <div
@@ -3295,7 +3677,7 @@ function HomeSection({
                 {r.trainStreak != null && r.trainStreak > 0 ? (
                   <span
                     className="relative inline-flex h-8 w-7 shrink-0 items-end justify-center text-[var(--accent)]"
-                    title={`Série : ${r.trainStreak} jour${r.trainStreak > 1 ? 's' : ''} consécutif${r.trainStreak > 1 ? 's' : ''}`}
+                    title={t({ en: 'Streak: {count} day(s) in a row', fr: 'Série : {count} jour(s) consécutif(s)' }, { count: r.trainStreak })}
                   >
                     <Flame className="h-8 w-8 shrink-0" fill="currentColor" stroke="none" aria-hidden />
                     <span className="pointer-events-none absolute bottom-[5px] left-1/2 -translate-x-1/2 text-[10px] font-bold leading-none text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.55)] tabular-nums">
@@ -3309,8 +3691,8 @@ function HomeSection({
                 <button
                   type="button"
                   className="inline-flex h-6 w-6 items-center justify-center rounded text-[var(--text)] opacity-70 hover:bg-[var(--accent-bg)] hover:text-[var(--accent)] hover:opacity-100"
-                  aria-label={`Renommer ${r.title}`}
-                  title="Renommer"
+                  aria-label={t({ en: 'Rename {title}', fr: 'Renommer {title}' }, { title: r.title })}
+                  title={t({ en: 'Rename', fr: 'Renommer' })}
                   onClick={(e) => {
                     e.stopPropagation()
                     onRename(r)
@@ -3321,8 +3703,8 @@ function HomeSection({
                 <button
                   type="button"
                   className="inline-flex h-6 w-6 items-center justify-center rounded text-[var(--text)] opacity-70 hover:bg-red-500/15 hover:text-red-600 hover:opacity-100 dark:hover:text-red-400"
-                  aria-label={`Supprimer ${r.title}`}
-                  title="Supprimer le répertoire"
+                  aria-label={t({ en: 'Delete {title}', fr: 'Supprimer {title}' }, { title: r.title })}
+                  title={t({ en: 'Delete repertoire', fr: 'Supprimer le répertoire' })}
                   onClick={(e) => {
                     e.stopPropagation()
                     onDelete(r)
@@ -3336,8 +3718,8 @@ function HomeSection({
                 <button
                   type="button"
                   className="inline-flex h-7 w-7 items-center justify-center rounded text-[var(--text)] opacity-70 hover:bg-[var(--accent-bg)] hover:text-[var(--accent)] hover:opacity-100"
-                  aria-label={`Télécharger ${r.title} en PGN`}
-                  title="Télécharger PGN"
+                  aria-label={t({ en: 'Download {title} as PGN', fr: 'Télécharger {title} en PGN' }, { title: r.title })}
+                  title={t({ en: 'Download PGN', fr: 'Télécharger PGN' })}
                   onClick={(e) => {
                     e.stopPropagation()
                     void onExportPgn(r.id)
@@ -3348,8 +3730,8 @@ function HomeSection({
                 <button
                   type="button"
                   className="inline-flex h-7 w-7 items-center justify-center rounded text-[var(--text)] opacity-70 hover:bg-[var(--accent-bg)] hover:text-[var(--accent)] hover:opacity-100"
-                  aria-label={`Partager ${r.title}`}
-                  title="Partager"
+                  aria-label={t({ en: 'Share {title}', fr: 'Partager {title}' }, { title: r.title })}
+                  title={t({ en: 'Share', fr: 'Partager' })}
                   onClick={(e) => {
                     e.stopPropagation()
                     onShare(r.id, r.title)
@@ -3377,6 +3759,7 @@ function CreateRepertoireModal({
   onClose: () => void
   onSubmit: (title: string, side: Side) => Promise<boolean>
 }) {
+  const { t } = useI18n()
   const [title, setTitle] = useState('')
   const [side, setSide] = useState<Side>('white')
 
@@ -3390,14 +3773,14 @@ function CreateRepertoireModal({
 
   return (
     <ModalFrame
-      title="Créer un répertoire"
+      title={t({ en: 'Create repertoire', fr: 'Créer un répertoire' })}
       onClose={() => {
         if (!busy) onClose()
       }}
       actions={
         <>
           <button type="button" className="counter" disabled={busy} onClick={onClose}>
-            Annuler
+            {t({ en: 'Cancel', fr: 'Annuler' })}
           </button>
           <button
             type="button"
@@ -3410,7 +3793,7 @@ function CreateRepertoireModal({
               })()
             }}
           >
-            Créer
+            {t({ en: 'Create', fr: 'Créer' })}
           </button>
         </>
       }
@@ -3418,21 +3801,21 @@ function CreateRepertoireModal({
       <div className="space-y-3 text-left text-sm text-[var(--text-h)]">
         <div>
           <label className="block text-xs font-medium opacity-90" htmlFor="create-rep-title">
-            Titre
+            {t({ en: 'Title', fr: 'Titre' })}
           </label>
           <input
             id="create-rep-title"
             className="mt-1.5 w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            placeholder="Mon ouverture…"
+            placeholder={t({ en: 'My opening…', fr: 'Mon ouverture…' })}
             maxLength={80}
             disabled={busy}
             autoFocus
           />
         </div>
         <div>
-          <span className="block text-xs font-medium opacity-90">Couleur du répertoire</span>
+          <span className="block text-xs font-medium opacity-90">{t({ en: 'Repertoire color', fr: 'Couleur du répertoire' })}</span>
           <div className="mt-2 flex flex-wrap gap-2">
             <button
               type="button"
@@ -3444,7 +3827,7 @@ function CreateRepertoireModal({
               onClick={() => setSide('white')}
             >
               <span className="h-2.5 w-2.5 rounded-full border border-neutral-400 bg-white shadow-sm" aria-hidden />
-              Blancs
+              {t({ en: 'White', fr: 'Blancs' })}
             </button>
             <button
               type="button"
@@ -3459,7 +3842,7 @@ function CreateRepertoireModal({
                 className="h-2.5 w-2.5 rounded-full border border-neutral-800 bg-neutral-900 dark:border-neutral-600 dark:bg-neutral-950"
                 aria-hidden
               />
-              Noirs
+              {t({ en: 'Black', fr: 'Noirs' })}
             </button>
           </div>
         </div>

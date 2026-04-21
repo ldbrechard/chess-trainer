@@ -12,6 +12,14 @@ export type Repertoire = {
   createdAt: number
   /** Jours consécutifs avec au moins un entraînement terminé (local). */
   trainStreak?: number
+  /** Jour local du dernier run entraînement (YYYY-MM-DD). */
+  lastTrainDayKey?: string
+  /** Notifications de rappel activées pour ce répertoire. */
+  notificationsEnabled?: boolean
+  /** Dernier jour où un rappel quotidien a été envoyé (YYYY-MM-DD). */
+  lastDailyReminderDayKey?: string
+  /** Dernier jour où un rappel 48h a été envoyé (YYYY-MM-DD). */
+  lastInactivityReminderDayKey?: string
 }
 
 /** Stockage FSRS par position (parentId = case où c’est à nous de jouer ; racine = `__root__`). */
@@ -56,7 +64,6 @@ export type StoredRepertoire = Repertoire & {
   dirty: boolean
   /** Premier jour où une file FSRS a été utilisée (YYYY-MM-DD). */
   fsrsFirstDayKey?: string
-  lastTrainDayKey?: string
 }
 
 export type StoredMove = Move & {
@@ -141,6 +148,10 @@ export function toPublicRepertoire(r: StoredRepertoire): Repertoire {
     side: r.side,
     createdAt: r.createdAt,
     trainStreak: r.trainStreak,
+    lastTrainDayKey: r.lastTrainDayKey,
+    notificationsEnabled: r.notificationsEnabled,
+    lastDailyReminderDayKey: r.lastDailyReminderDayKey,
+    lastInactivityReminderDayKey: r.lastInactivityReminderDayKey,
   }
 }
 

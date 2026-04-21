@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { getSupabaseClient } from '../lib/supabaseClient'
+import { useI18n } from '../i18n'
 
 type Props = {
   /** When true, tighter copy for modal overlay */
@@ -8,6 +9,7 @@ type Props = {
 }
 
 export function AuthScreen({ embedded, onAuthenticated }: Props) {
+  const { t } = useI18n()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [mode, setMode] = useState<'signin' | 'signup'>('signin')
@@ -19,7 +21,7 @@ export function AuthScreen({ embedded, onAuthenticated }: Props) {
     setMessage(null)
     const em = email.trim()
     if (!em || !password) {
-      setMessage('Email et mot de passe requis.')
+      setMessage(t({ en: 'Email and password are required.', fr: 'Email et mot de passe requis.' }))
       return
     }
     setBusy(true)
@@ -28,14 +30,19 @@ export function AuthScreen({ embedded, onAuthenticated }: Props) {
       if (mode === 'signup') {
         const { error } = await supabase.auth.signUp({ email: em, password })
         if (error) throw error
-        setMessage('Compte créé. Si la confirmation email est activée, vérifie ta boîte.')
+        setMessage(
+          t({
+            en: 'Account created. If email confirmation is enabled, check your inbox.',
+            fr: 'Compte créé. Si la confirmation email est activée, vérifie ta boîte.',
+          }),
+        )
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email: em, password })
         if (error) throw error
         onAuthenticated?.()
       }
     } catch (err) {
-      setMessage(err instanceof Error ? err.message : 'Erreur de connexion.')
+      setMessage(err instanceof Error ? err.message : t({ en: 'Sign-in error.', fr: 'Erreur de connexion.' }))
     } finally {
       setBusy(false)
     }
@@ -47,8 +54,14 @@ export function AuthScreen({ embedded, onAuthenticated }: Props) {
         <h1 className="text-2xl font-semibold">Chess Trainer</h1>
         <p className="mt-2 text-sm opacity-80">
           {embedded
-            ? 'Connecte-toi pour synchroniser tes répertoires avec le cloud.'
-            : 'Connecte-toi pour synchroniser tes répertoires (Supabase).'}
+            ? t({
+                en: 'Sign in to sync your repertoires with the cloud.',
+                fr: 'Connecte-toi pour synchroniser tes répertoires avec le cloud.',
+              })
+            : t({
+                en: 'Sign in to sync your repertoires (Supabase).',
+                fr: 'Connecte-toi pour synchroniser tes répertoires (Supabase).',
+              })}
         </p>
       </div>
 
@@ -58,14 +71,14 @@ export function AuthScreen({ embedded, onAuthenticated }: Props) {
           className={`counter ${mode === 'signin' ? 'ring-2 ring-[var(--accent)]' : ''}`}
           onClick={() => setMode('signin')}
         >
-          Connexion
+          {t({ en: 'Sign in', fr: 'Connexion' })}
         </button>
         <button
           type="button"
           className={`counter ${mode === 'signup' ? 'ring-2 ring-[var(--accent)]' : ''}`}
           onClick={() => setMode('signup')}
         >
-          Inscription
+          {t({ en: 'Sign up', fr: 'Inscription' })}
         </button>
       </div>
 
@@ -83,7 +96,7 @@ export function AuthScreen({ embedded, onAuthenticated }: Props) {
           disabled={busy}
         />
         <label className="block text-sm font-medium" htmlFor="auth-password">
-          Mot de passe
+          {t({ en: 'Password', fr: 'Mot de passe' })}
         </label>
         <input
           id="auth-password"
@@ -96,7 +109,7 @@ export function AuthScreen({ embedded, onAuthenticated }: Props) {
         />
         {message ? <p className="text-sm opacity-90">{message}</p> : null}
         <button type="submit" className="counter w-full" disabled={busy}>
-          {mode === 'signup' ? "S'inscrire" : 'Se connecter'}
+          {mode === 'signup' ? t({ en: 'Create account', fr: "S'inscrire" }) : t({ en: 'Sign in', fr: 'Se connecter' })}
         </button>
       </form>
     </div>

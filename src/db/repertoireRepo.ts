@@ -28,6 +28,7 @@ export async function createRepertoire(input: { title: string; side: Side }): Pr
     title: input.title.trim(),
     side: input.side,
     createdAt: t,
+    notificationsEnabled: false,
     updatedAt: t,
     dirty: true,
   }
@@ -126,6 +127,15 @@ export async function updateRepertoireTitle(id: string, title: string): Promise<
   const now = nowMs()
   await db.repertoires.update(id, { title: t, dirty: true, updatedAt: now })
   scheduleRepertoireSync()
+}
+
+/** Local-only notification preferences/markers (not synced to cloud). */
+export async function updateRepertoireNotificationSettings(
+  id: string,
+  patch: Partial<Pick<StoredRepertoire, 'notificationsEnabled' | 'lastDailyReminderDayKey' | 'lastInactivityReminderDayKey'>>,
+): Promise<void> {
+  if (!(await db.repertoires.get(id))) return
+  await db.repertoires.update(id, patch)
 }
 
 export async function listChildrenMoves(input: {
