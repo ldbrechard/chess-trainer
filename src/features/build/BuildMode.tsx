@@ -3584,7 +3584,7 @@ export function BuildMode() {
                 ) : null}
               </section>
 
-              <section className="mt-3 flex-1 overflow-y-auto pb-[calc(8rem+env(safe-area-inset-bottom,0px))]">
+              <section className="mt-3 flex-1 overflow-y-auto pb-[calc(3.75rem+env(safe-area-inset-bottom,0px))]">
                 {mobileBuildTab === 'tree' ? (
                   <MoveTreeView
                     forest={forest}
@@ -3721,14 +3721,14 @@ export function BuildMode() {
                     role="tab"
                     aria-selected={mobileBuildTab === id}
                     className={[
-                      'flex h-[6.5rem] flex-col items-center justify-center gap-1 text-[11px] font-medium leading-tight transition-colors',
+                      'flex h-[3.25rem] flex-col items-center justify-center gap-0.5 text-[10px] font-medium leading-tight transition-colors',
                       mobileBuildTab === id
                         ? 'text-[var(--accent)]'
                         : 'text-[var(--text)] opacity-80',
                     ].join(' ')}
                     onClick={() => setMobileBuildTab(id)}
                   >
-                    <Icon className="h-5 w-5 shrink-0 opacity-90" strokeWidth={2} aria-hidden />
+                    <Icon className="h-3.5 w-3.5 shrink-0 opacity-90" strokeWidth={2} aria-hidden />
                     <span>{label}</span>
                   </button>
                 ))}
@@ -4141,7 +4141,7 @@ export function BuildMode() {
             className={[
               'w-full gap-4',
               device.isMobile && mode === 'build'
-                ? 'flex flex-col pb-[calc(8rem+env(safe-area-inset-bottom,0px))]'
+                ? 'flex flex-col pb-[calc(4.25rem+env(safe-area-inset-bottom,0px))]'
                 : !device.isMobile && mode === 'build'
                   ? 'grid grid-cols-[30%_50%_20%] pr-[30px]'
                   : 'grid grid-cols-1 lg:grid-cols-[340px_1fr]',
