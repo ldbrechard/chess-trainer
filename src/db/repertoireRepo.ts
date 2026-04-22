@@ -20,12 +20,13 @@ export async function listRepertoires(): Promise<Repertoire[]> {
   return rows.map(toPublicRepertoire)
 }
 
-export async function createRepertoire(input: { title: string; side: Side }): Promise<string> {
+export async function createRepertoire(input: { title: string; description?: string; side: Side }): Promise<string> {
   const id = crypto.randomUUID()
   const t = nowMs()
   const row: StoredRepertoire = {
     id,
     title: input.title.trim(),
+    description: input.description?.trim() ? input.description.trim().slice(0, 140) : undefined,
     side: input.side,
     createdAt: t,
     notificationsEnabled: false,
@@ -108,6 +109,29 @@ export async function promoteMoveToMainLine(moveId: string): Promise<void> {
   scheduleRepertoireSync()
 }
 
+/** Move a variation earlier among siblings (without changing main-line flag). */
+export async function promoteVariation(moveId: string): Promise<void> {
+  const m = await db.moves.get(moveId)
+  if (!m) return
+  const siblings = await db.moves
+    .where('repertoireId')
+    .equals(m.repertoireId)
+    .and((row) => row.parentId === m.parentId)
+    .toArray()
+  if (siblings.length < 2) return
+  const otherTimes = siblings
+    .filter((s) => s.id !== m.id)
+    .map((s) => Date.parse(s.createdAt))
+    .filter((n) => Number.isFinite(n))
+  if (otherTimes.length === 0) return
+  const minOther = Math.min(...otherTimes)
+  const createdAt = new Date(Math.max(0, minOther - 1)).toISOString()
+  const t = nowMs()
+  await db.moves.update(m.id, { createdAt, dirty: true, updatedAt: t })
+  await db.repertoires.update(m.repertoireId, { dirty: true, updatedAt: t })
+  scheduleRepertoireSync()
+}
+
 export async function deleteRepertoire(id: string): Promise<void> {
   const existing = await db.repertoires.get(id)
   if (!existing) return
@@ -126,6 +150,28 @@ export async function updateRepertoireTitle(id: string, title: string): Promise<
   if (!(await db.repertoires.get(id))) return
   const now = nowMs()
   await db.repertoires.update(id, { title: t, dirty: true, updatedAt: now })
+  scheduleRepertoireSync()
+}
+
+export async function updateRepertoireMetadata(
+  id: string,
+  patch: { title?: string; description?: string | undefined },
+): Promise<void> {
+  const existing = await db.repertoires.get(id)
+  if (!existing) return
+  const next: Partial<StoredRepertoire> = {}
+  if (patch.title !== undefined) {
+    const title = patch.title.trim().slice(0, 80)
+    if (!title) return
+    next.title = title
+  }
+  if (patch.description !== undefined) {
+    const description = patch.description.trim()
+    next.description = description ? description.slice(0, 140) : undefined
+  }
+  if (Object.keys(next).length === 0) return
+  const now = nowMs()
+  await db.repertoires.update(id, { ...next, dirty: true, updatedAt: now })
   scheduleRepertoireSync()
 }
 

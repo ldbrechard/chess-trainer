@@ -1,4 +1,4 @@
-import { useMemo, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react'
+import { useEffect, useMemo, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react'
 import type { Move } from '../../db/schema'
 import type { MoveForest, MoveNode } from '../../chess/moveTree'
 import { useI18n } from '../../i18n'
@@ -8,12 +8,26 @@ type Props = {
   pathIds: Set<string>
   onSelectMove: (move: Move) => void | Promise<void>
   onDeleteMove?: (move: Move) => void | Promise<void>
+  onPromoteVariant?: (move: Move) => void | Promise<void>
+  onMakeMainLine?: (move: Move) => void | Promise<void>
+  onCopyVariantPgn?: (move: Move) => void | Promise<void>
 }
 
-export function MoveTreeView({ forest, pathIds, onSelectMove, onDeleteMove }: Props) {
+type ContextMenuState = { move: Move; x: number; y: number } | null
+
+export function MoveTreeView({
+  forest,
+  pathIds,
+  onSelectMove,
+  onDeleteMove,
+  onPromoteVariant,
+  onMakeMainLine,
+  onCopyVariantPgn,
+}: Props) {
   const { t } = useI18n()
   const [expandedVarKeys, setExpandedVarKeys] = useState<Set<string>>(() => new Set())
   const [expandedContinuationIds, setExpandedContinuationIds] = useState<Set<string>>(() => new Set())
+  const [contextMenu, setContextMenu] = useState<ContextMenuState>(null)
 
   const ctx = useMemo(
     () => ({
@@ -25,11 +39,75 @@ export function MoveTreeView({ forest, pathIds, onSelectMove, onDeleteMove }: Pr
     [expandedContinuationIds, expandedVarKeys],
   )
 
+  useEffect(() => {
+    if (!contextMenu) return
+    const onPointerDown = () => setContextMenu(null)
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setContextMenu(null)
+    }
+    window.addEventListener('pointerdown', onPointerDown, true)
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown, true)
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [contextMenu])
+
   return (
-    <div className="rounded-md border border-[var(--border)] bg-[var(--bg)] p-2">
+    <div className="relative rounded-md border border-[var(--border)] bg-[var(--bg)] p-2">
       <div className="mt-1 text-sm leading-5">
-        {renderForest(forest, pathIds, onSelectMove, onDeleteMove, 0, 'root', true, ctx, t)}
+        {renderForest(forest, pathIds, onSelectMove, onDeleteMove, 0, 'root', true, ctx, t, (move, x, y) => {
+          setContextMenu({ move, x, y })
+        })}
       </div>
+      {contextMenu ? (
+        <div
+          className="fixed z-[120] min-w-[220px] rounded-md border border-[var(--border)] bg-[var(--bg)] p-1.5 text-left shadow-xl"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            className="block w-full rounded px-2 py-1.5 text-left text-xs text-[var(--text-h)] hover:bg-[var(--accent-bg)]"
+            onClick={() => {
+              setContextMenu(null)
+              void onPromoteVariant?.(contextMenu.move)
+            }}
+          >
+            {t({ en: 'Promote variation', fr: 'Promouvoir la variante' })}
+          </button>
+          <button
+            type="button"
+            className="block w-full rounded px-2 py-1.5 text-left text-xs text-[var(--text-h)] hover:bg-[var(--accent-bg)]"
+            onClick={() => {
+              setContextMenu(null)
+              void onMakeMainLine?.(contextMenu.move)
+            }}
+          >
+            {t({ en: 'Make main line', fr: 'En faire la variante principale' })}
+          </button>
+          <button
+            type="button"
+            className="block w-full rounded px-2 py-1.5 text-left text-xs text-[var(--text-h)] hover:bg-[var(--accent-bg)]"
+            onClick={() => {
+              setContextMenu(null)
+              void onCopyVariantPgn?.(contextMenu.move)
+            }}
+          >
+            {t({ en: 'Copy variation PGN', fr: 'Copier le PGN de la variante' })}
+          </button>
+          <button
+            type="button"
+            className="block w-full rounded px-2 py-1.5 text-left text-xs text-red-600 hover:bg-red-500/10 dark:text-red-400"
+            onClick={() => {
+              setContextMenu(null)
+              void onDeleteMove?.(contextMenu.move)
+            }}
+          >
+            {t({ en: 'Delete from here', fr: 'Supprimer à partir d’ici' })}
+          </button>
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -104,6 +182,7 @@ function renderForest(
   atLineStart: boolean,
   ctx: Ctx,
   t: ReturnType<typeof useI18n>['t'],
+  onOpenContextMenu: (move: Move, x: number, y: number) => void,
 ) {
   if (forest.length === 0) {
     return <span className="opacity-80">{t({ en: '(empty)', fr: '(vide)' })}</span>
@@ -117,7 +196,7 @@ function renderForest(
 
   return (
     <>
-      {main ? renderLine(main, pathIds, onSelectMove, onDeleteMove, depth, atLineStart, ctx, t) : null}
+      {main ? renderLine(main, pathIds, onSelectMove, onDeleteMove, depth, atLineStart, ctx, t, onOpenContextMenu) : null}
 
       {showVarsToggle ? (
         <div className="mt-1">
@@ -145,7 +224,7 @@ function renderForest(
             <div className="mt-1 space-y-1 border-l border-[var(--border)] pl-2">
               {vars.map((v) => (
                 <div key={v.move.id} className="opacity-95">
-                  {renderLine(v, pathIds, onSelectMove, onDeleteMove, depth, true, ctx, t)}
+                  {renderLine(v, pathIds, onSelectMove, onDeleteMove, depth, true, ctx, t, onOpenContextMenu)}
                 </div>
               ))}
             </div>
@@ -173,6 +252,7 @@ function renderLine(
   atLineStart: boolean,
   ctx: Ctx,
   t: ReturnType<typeof useI18n>['t'],
+  onOpenContextMenu: (move: Move, x: number, y: number) => void,
 ): ReactNode {
   const id = node.move.id
   const isInPath = id != null && pathIds.has(id)
@@ -186,10 +266,10 @@ function renderLine(
         isInPath ? 'bg-[var(--accent-bg)] text-[var(--text-h)]' : 'text-[var(--text-h)]',
       ].join(' ')}
       onContextMenu={
-        onDeleteMove && node.move.id != null
+        node.move.id != null
           ? (e) => {
               e.preventDefault()
-              void onDeleteMove(node.move)
+              onOpenContextMenu(node.move, e.clientX + 6, e.clientY + 6)
             }
           : undefined
       }
@@ -233,6 +313,7 @@ function renderLine(
           false,
           ctx,
           t,
+          onOpenContextMenu,
         )
       )}
     </>

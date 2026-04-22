@@ -1,8 +1,18 @@
 import type { EngineEval } from '../lib/stockfishClient'
 
 /** Vertical bar: white on top, black on bottom; divider height reflects White-positive cp (Stockfish convention). */
-export function EvalBar({ eval: ev, className = '' }: { eval: EngineEval | null; className?: string }) {
+export function EvalBar({
+  eval: ev,
+  className = '',
+  bottomColor = 'black',
+}: {
+  eval: EngineEval | null
+  className?: string
+  bottomColor?: 'white' | 'black'
+}) {
   const pctWhiteFromTop = evalToWhitePct(ev)
+  const whiteHeight = pctWhiteFromTop
+  const splitTop = bottomColor === 'white' ? 100 - pctWhiteFromTop : pctWhiteFromTop
 
   return (
     <div
@@ -15,12 +25,15 @@ export function EvalBar({ eval: ev, className = '' }: { eval: EngineEval | null;
     >
       <div className="absolute inset-0 bg-black" />
       <div
-        className="absolute inset-x-0 top-0 bg-white transition-[height] duration-200"
-        style={{ height: `${pctWhiteFromTop}%` }}
+        className={[
+          'absolute inset-x-0 bg-white transition-[height] duration-200',
+          bottomColor === 'white' ? 'bottom-0' : 'top-0',
+        ].join(' ')}
+        style={{ height: `${whiteHeight}%` }}
       />
       <div
         className="pointer-events-none absolute inset-x-0 top-0 border-b-2 border-amber-500/90"
-        style={{ top: `${pctWhiteFromTop}%`, transform: 'translateY(-1px)' }}
+        style={{ top: `${splitTop}%`, transform: 'translateY(-1px)' }}
       />
     </div>
   )

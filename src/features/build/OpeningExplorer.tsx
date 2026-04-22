@@ -280,13 +280,13 @@ export function OpeningExplorer({
   }, [fen, stockfishActive, stockfishEvaluateFen, uciListKey])
 
   return (
-    <div className="mt-4 rounded-md border border-[var(--border)] bg-[var(--bg)] p-3 text-left text-sm">
+    <div className="mt-4 rounded-md border border-[var(--border)] bg-white p-3 text-left text-sm">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
             <button
               type="button"
-              className="inline-flex min-w-0 items-center gap-1.5 text-xs font-medium text-[var(--text-h)] hover:underline"
+              className="inline-flex min-w-0 items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--text-h)] opacity-70 hover:underline hover:opacity-100"
               onClick={onToggleCollapsed}
               aria-expanded={!collapsed}
               title={collapsed ? t({ en: 'Expand', fr: 'Déplier' }) : t({ en: 'Collapse', fr: 'Replier' })}
@@ -405,7 +405,7 @@ export function OpeningExplorer({
                 <button
                   key={m.uci}
                   type="button"
-                  className="w-full rounded-md border border-[var(--border)] px-2 py-1 text-left hover:bg-[var(--accent-bg)]"
+                  className="w-full rounded-md border border-[var(--border)] bg-[var(--code-bg)] px-2 py-1 text-left hover:bg-[var(--accent-bg)]"
                   onClick={() => onPlayMove?.(m.uci)}
                   title={t({ en: 'Play this move', fr: 'Jouer ce coup' })}
                 >

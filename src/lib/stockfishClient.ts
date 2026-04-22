@@ -3,6 +3,8 @@
 export type EngineEval = {
   cp?: number
   mate?: number
+  depth?: number
+  pvUci?: string[]
 }
 
 function stockfishWorkerUrl(): string {
@@ -22,14 +24,25 @@ function splitLines(raw: unknown): string[] {
 function parseEvalFromUciOutput(text: string): EngineEval {
   let cp: number | undefined
   let mate: number | undefined
+  let depth: number | undefined
+  let pvUci: string[] | undefined
   for (const line of text.split(/\n/)) {
     if (!line.startsWith('info')) continue
+    const depthM = line.match(/\bdepth (\d+)\b/)
+    if (depthM) depth = Number(depthM[1])
     const cpM = line.match(/\bscore cp (-?\d+)\b/)
     if (cpM) cp = Number(cpM[1])
     const mateM = line.match(/\bscore mate (-?\d+)\b/)
     if (mateM) mate = Number(mateM[1])
+    const pvM = line.match(/\bpv (.+)$/)
+    if (pvM) {
+      pvUci = pvM[1]
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean)
+    }
   }
-  return { cp, mate }
+  return { cp, mate, depth, pvUci }
 }
 
 function formatEval(e: EngineEval | null): string {

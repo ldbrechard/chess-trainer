@@ -8,6 +8,7 @@ export type MoveId = string
 export type Repertoire = {
   id: RepertoireId
   title: string
+  description?: string
   side: Side
   createdAt: number
   /** Jours consécutifs avec au moins un entraînement terminé (local). */
@@ -145,6 +146,7 @@ export function toPublicRepertoire(r: StoredRepertoire): Repertoire {
   return {
     id: r.id,
     title: r.title,
+    description: r.description,
     side: r.side,
     createdAt: r.createdAt,
     trainStreak: r.trainStreak,

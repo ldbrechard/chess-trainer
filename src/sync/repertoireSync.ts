@@ -45,6 +45,7 @@ function remoteToStoredRep(r: RepRow, local?: StoredRepertoire): StoredRepertoir
   return {
     id: r.id,
     title: r.title,
+    description: local?.description,
     side: r.side as Side,
     createdAt: new Date(r.created_at).getTime(),
     updatedAt: ts(r),

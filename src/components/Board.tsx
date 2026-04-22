@@ -15,6 +15,7 @@ type Props = {
   dests: Map<Key, Key[]>
   turnColor: 'white' | 'black'
   orientation?: 'white' | 'black'
+  showCoordinates?: boolean
   lastMove?: [Key, Key] | null
   selectedSquare?: Key | null
   showDests?: boolean
@@ -39,6 +40,7 @@ export function Board({
   dests,
   turnColor,
   orientation = 'white',
+  showCoordinates = true,
   lastMove,
   selectedSquare,
   showDests = true,
@@ -154,7 +156,7 @@ export function Board({
 
     const api = Chessground(el, {
       orientation,
-      coordinates: true,
+      coordinates: showCoordinates,
       blockTouchScroll: touchMoveMode,
       turnColor: turnColorRef.current,
       movable: {
@@ -194,7 +196,7 @@ export function Board({
     }
     // Intentionally omit lastMove / selectedSquare / shapes: they are applied in the update effect below.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- avoid destroying the instance on every draw/highlight
-  }, [orientation, drawableEnabled, drawableVisible, showDests, touchMoveMode])
+  }, [orientation, showCoordinates, drawableEnabled, drawableVisible, showDests, touchMoveMode])
 
   useEffect(() => {
     apiRef.current?.set({

@@ -10,6 +10,7 @@ import {
   LayoutGrid,
   ListTree,
   Pencil,
+  Power,
   Settings,
   Share2,
   SkipForward,
@@ -35,12 +36,14 @@ import {
   listChildrenMoves,
   listAllMoves,
   listRepertoires,
+  promoteVariation,
   promoteMoveToMainLine,
   updateMove,
+  updateRepertoireMetadata,
   updateRepertoireNotificationSettings,
-  updateRepertoireTitle,
 } from '../../db/repertoireRepo'
-import { buildFsrsTrainQueue, recordPositionFsrsReview } from '../../db/fsrsRepo'
+import { buildFsrsTrainQueue, encodeParentKey, recordPositionFsrsReview } from '../../db/fsrsRepo'
+import { db } from '../../db/schema'
 import { dayKeyFromTimestamp, insertTrainRun, touchTrainActivityDay } from '../../db/trainStatsRepo'
 import { exportRepertoireToPgn } from '../../lib/pgnImportExport'
 import { normalizeToUsefulPuzzleTag } from '../../lib/puzzleOpeningTags'
@@ -98,10 +101,13 @@ type Modal =
 
 type View = 'home' | 'session'
 type RepertoireCounts = Record<string, number>
+type RepertoireMastery = Record<string, number>
 type AnnotationTool = 'none' | 'arrow' | 'circle'
 type AnnotationBrush = NonNullable<DrawShape['brush']>
 
 const ANNOTATION_BRUSH_CYCLE = ['green', 'red', 'blue'] as const satisfies readonly AnnotationBrush[]
+const EMPTY_DESTS = new Map<Key, Key[]>()
+const STOCKFISH_VERSION_LABEL = 'Stockfish 16.1'
 
 function sideToTurn(side: Side): 'w' | 'b' {
   return side === 'white' ? 'w' : 'b'
@@ -126,16 +132,17 @@ type PlaybackSettings = {
   replayMoves: boolean
   soundOn: boolean
 }
-type VisualTheme = 'violet' | 'acid_blue' | 'dark_contrast'
+type VisualTheme = 'high_contrast' | 'soft_pro'
 
 const PLAYBACK_SETTINGS_STORAGE_KEY = 'chess-trainer:playback-settings:v1'
 const VISUAL_THEME_STORAGE_KEY = 'chess-trainer:visual-theme:v1'
+const LAST_OPENED_REPERTOIRE_STORAGE_KEY = 'chess-trainer:last-opened-repertoire:v1'
 const DEFAULT_PLAYBACK_SETTINGS: PlaybackSettings = {
   animationSpeed: 'fast',
   replayMoves: true,
   soundOn: false,
 }
-const DEFAULT_VISUAL_THEME: VisualTheme = 'violet'
+const DEFAULT_VISUAL_THEME: VisualTheme = 'soft_pro'
 
 const SPEED_DELAY_MS: Record<AnimationSpeed, { replayStart: number; replayStep: number; autoReply: number; nextLine: number }> = {
   very_fast: { replayStart: 80, replayStep: 120, autoReply: 120, nextLine: 500 },
@@ -178,7 +185,7 @@ function persistPlaybackSettings(s: PlaybackSettings) {
 function readVisualTheme(): VisualTheme {
   try {
     const raw = window.localStorage.getItem(VISUAL_THEME_STORAGE_KEY)
-    if (raw === 'violet' || raw === 'acid_blue' || raw === 'dark_contrast') return raw
+    if (raw === 'high_contrast' || raw === 'soft_pro') return raw
     return DEFAULT_VISUAL_THEME
   } catch {
     return DEFAULT_VISUAL_THEME
@@ -188,6 +195,22 @@ function readVisualTheme(): VisualTheme {
 function persistVisualTheme(theme: VisualTheme) {
   try {
     window.localStorage.setItem(VISUAL_THEME_STORAGE_KEY, theme)
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function readLastOpenedRepertoireId(): string | null {
+  try {
+    return window.localStorage.getItem(LAST_OPENED_REPERTOIRE_STORAGE_KEY)
+  } catch {
+    return null
+  }
+}
+
+function persistLastOpenedRepertoireId(id: string): void {
+  try {
+    window.localStorage.setItem(LAST_OPENED_REPERTOIRE_STORAGE_KEY, id)
   } catch {
     // ignore storage errors
   }
@@ -238,6 +261,123 @@ function expectedTrainReplies(children: Move[], mainLineOnly: boolean): Move[] {
   return children
 }
 
+function computeTrainPositionsForRepertoire(side: Side, moves: Move[]): Array<string | null> {
+  const byId = new Map<string, Move>()
+  for (const m of moves) byId.set(m.id, m)
+
+  const childrenByParent = new Map<string | null, Move[]>()
+  for (const m of moves) {
+    const key = m.parentId ?? null
+    const list = childrenByParent.get(key)
+    if (list) list.push(m)
+    else childrenByParent.set(key, [m])
+  }
+
+  const out: Array<string | null> = []
+  for (const parentId of childrenByParent.keys()) {
+    const kids = childrenByParent.get(parentId) ?? []
+    if (kids.length === 0) continue
+    const fen = parentId == null ? new Chess().fen() : byId.get(parentId)?.fen
+    if (!fen) continue
+    const c = new Chess()
+    try {
+      c.load(fen)
+    } catch {
+      continue
+    }
+    if (c.turn() === sideToTurn(side)) out.push(parentId)
+  }
+  return out
+}
+
+function computeMaxDepthForRepertoire(moves: Move[]): number {
+  if (moves.length === 0) return 0
+  const byId = new Map<string, Move>()
+  for (const move of moves) byId.set(move.id, move)
+  const depthById = new Map<string, number>()
+  const depthOf = (id: string): number => {
+    const cached = depthById.get(id)
+    if (cached != null) return cached
+    const move = byId.get(id)
+    if (!move) return 0
+    const depth = move.parentId ? depthOf(move.parentId) + 1 : 1
+    depthById.set(id, depth)
+    return depth
+  }
+  let maxDepth = 0
+  for (const move of moves) {
+    const d = depthOf(move.id)
+    if (d > maxDepth) maxDepth = d
+  }
+  return maxDepth
+}
+
+function computeMainLineTerminalFen(moves: Move[]): string {
+  if (moves.length === 0) return new Chess().fen()
+  const childrenByParent = new Map<string | null, Move[]>()
+  for (const m of moves) {
+    const key = m.parentId ?? null
+    const list = childrenByParent.get(key)
+    if (list) list.push(m)
+    else childrenByParent.set(key, [m])
+  }
+  let parentId: string | null = null
+  let currentFen = new Chess().fen()
+  for (;;) {
+    const children = childrenByParent.get(parentId) ?? []
+    if (children.length === 0) return currentFen
+    const main = pickMainLineChild(children)
+    if (!main) return currentFen
+    currentFen = main.fen
+    parentId = main.id
+  }
+}
+
+function formatLastTrainLabel(dayKey: string | undefined, t: ReturnType<typeof useI18n>['t']): string {
+  if (!dayKey) return t({ en: 'Never', fr: 'Jamais' })
+  const [y, m, d] = dayKey.split('-').map(Number)
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return dayKey
+  const trainMs = new Date(y, m - 1, d, 12, 0, 0, 0).getTime()
+  const daysAgo = Math.max(0, Math.floor((Date.now() - trainMs) / 86400000))
+  if (daysAgo === 0) return t({ en: 'Today', fr: "Aujourd'hui" })
+  if (daysAgo === 1) return t({ en: 'Yesterday', fr: 'Hier' })
+  return t({ en: '{count} days ago', fr: 'Il y a {count} jours' }, { count: daysAgo })
+}
+
+function pvUciToSanLine(fen: string, pvUci: string[] | undefined): string {
+  if (!pvUci || pvUci.length === 0) return '—'
+  const c = new Chess()
+  try {
+    c.load(fen)
+  } catch {
+    return pvUci.join(' ')
+  }
+  const out: string[] = []
+  for (let i = 0; i < pvUci.length; i += 1) {
+    const uci = pvUci[i]!
+    const from = uci.slice(0, 2)
+    const to = uci.slice(2, 4)
+    const promotion = uci.length > 4 ? uci[4] : undefined
+    const m = c.move({ from, to, promotion: promotion as 'q' | 'r' | 'b' | 'n' | undefined })
+    if (!m) break
+    if (m.color === 'w') out.push(`${Math.max(1, c.moveNumber() - 1)}. ${m.san}`)
+    else out.push(m.san)
+  }
+  return out.length > 0 ? out.join(' ') : pvUci.join(' ')
+}
+
+function lineToPgnMoves(moves: Move[]): string {
+  if (moves.length === 0) return '*'
+  const tokens: string[] = []
+  for (let ply = 0; ply < moves.length; ply += 1) {
+    const m = moves[ply]!
+    if (ply % 2 === 0) tokens.push(`${Math.floor(ply / 2) + 1}.`)
+    tokens.push(m.notation)
+  }
+  tokens.push('*')
+  return tokens.join(' ')
+}
+
 type MobileBuildTab = 'tree' | 'board'
 
 export function BuildMode() {
@@ -250,8 +390,16 @@ export function BuildMode() {
   const [shareTarget, setShareTarget] = useState<{ id: string; title: string } | null>(null)
   const [renameTarget, setRenameTarget] = useState<Repertoire | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
+  const [renameDescriptionDraft, setRenameDescriptionDraft] = useState('')
   const [repertoires, setRepertoires] = useState<Repertoire[]>([])
   const [repertoireCounts, setRepertoireCounts] = useState<RepertoireCounts>({})
+  const [repertoireDueCounts, setRepertoireDueCounts] = useState<RepertoireCounts>({})
+  const [repertoireMaxDepth, setRepertoireMaxDepth] = useState<RepertoireCounts>({})
+  const [repertoireMastery, setRepertoireMastery] = useState<RepertoireMastery>({})
+  const [repertoireMainLineFens, setRepertoireMainLineFens] = useState<Record<string, string>>({})
+  const [lastOpenedRepertoireId, setLastOpenedRepertoireId] = useState<string | null>(() =>
+    readLastOpenedRepertoireId(),
+  )
   const [activeRepertoireId, setActiveRepertoireId] = useState<string | null>(null)
   const [activeRepertoire, setActiveRepertoire] = useState<Repertoire | null>(null)
 
@@ -365,34 +513,7 @@ export function BuildMode() {
 
   const trainPositions = useMemo(() => {
     if (!activeRepertoire) return []
-
-    const byId = new Map<string, Move>()
-    for (const m of allMoves) byId.set(m.id, m)
-
-    const childrenByParent = new Map<string | null, Move[]>()
-    for (const m of allMoves) {
-      const key = m.parentId ?? null
-      const list = childrenByParent.get(key)
-      if (list) list.push(m)
-      else childrenByParent.set(key, [m])
-    }
-
-    const parents = [...childrenByParent.keys()]
-    const out: Array<string | null> = []
-    for (const parentId of parents) {
-      const kids = childrenByParent.get(parentId) ?? []
-      if (kids.length === 0) continue
-      const fen = parentId == null ? new Chess().fen() : byId.get(parentId)?.fen
-      if (!fen) continue
-      const c = new Chess()
-      try {
-        c.load(fen)
-      } catch {
-        continue
-      }
-      if (c.turn() === sideToTurn(activeRepertoire.side)) out.push(parentId)
-    }
-    return out
+    return computeTrainPositionsForRepertoire(activeRepertoire.side, allMoves)
   }, [activeRepertoire, allMoves])
 
   const selectionTrainPositions = useMemo(() => {
@@ -452,6 +573,7 @@ export function BuildMode() {
       ? 'black'
       : 'white'
   const boardDests = showDests ? dests : new Map<Key, Key[]>()
+  const stockfishPvLine = useMemo(() => pvUciToSanLine(currentFen, positionEval?.pvUci), [currentFen, positionEval?.pvUci])
   const currentShapes = shapesByFen[currentFen] ?? []
   const puzzleChess = useMemo(() => {
     if (!puzzleFen) return null
@@ -510,6 +632,14 @@ export function BuildMode() {
   const isAnnotating = mode === 'build' && annotationTool !== 'none'
   const whiteRepertoires = useMemo(() => repertoires.filter((r) => r.side === 'white'), [repertoires])
   const blackRepertoires = useMemo(() => repertoires.filter((r) => r.side === 'black'), [repertoires])
+  const currentFocusRepertoire = useMemo(() => {
+    if (repertoires.length === 0) return null
+    const byLast = repertoires.find((r) => r.id === lastOpenedRepertoireId)
+    if (byLast) return byLast
+    const byActive = repertoires.find((r) => r.id === activeRepertoireId)
+    if (byActive) return byActive
+    return repertoires[0] ?? null
+  }, [activeRepertoireId, lastOpenedRepertoireId, repertoires])
 
   useEffect(() => {
     persistPlaybackSettings(playbackSettings)
@@ -517,8 +647,13 @@ export function BuildMode() {
 
   useEffect(() => {
     persistVisualTheme(visualTheme)
-    document.documentElement.setAttribute('data-visual-theme', visualTheme)
   }, [visualTheme])
+
+  useEffect(() => {
+    if (!activeRepertoireId) return
+    setLastOpenedRepertoireId(activeRepertoireId)
+    persistLastOpenedRepertoireId(activeRepertoireId)
+  }, [activeRepertoireId])
 
   const toggleRepertoireNotifications = useCallback(() => {
     if (!activeRepertoireId) return
@@ -631,13 +766,33 @@ export function BuildMode() {
     setRepertoires(reps)
 
     const counts: RepertoireCounts = {}
+    const dueCounts: RepertoireCounts = {}
+    const maxDepthByRep: RepertoireCounts = {}
+    const masteryByRep: RepertoireMastery = {}
+    const mainLineFensByRep: Record<string, string> = {}
     await Promise.all(
       reps.map(async (rep) => {
         const moves = await listAllMoves(rep.id)
         counts[rep.id] = moves.length
+        maxDepthByRep[rep.id] = computeMaxDepthForRepertoire(moves)
+        mainLineFensByRep[rep.id] = computeMainLineTerminalFen(moves)
+        const trainable = computeTrainPositionsForRepertoire(rep.side, moves)
+        dueCounts[rep.id] = (await buildFsrsTrainQueue(rep.id, trainable)).length
+        if (trainable.length === 0) {
+          masteryByRep[rep.id] = 0
+          return
+        }
+        const cards = await db.fsrsCards.where('repertoireId').equals(rep.id).toArray()
+        const seenKeys = new Set(cards.map((x) => x.parentPositionKey))
+        const covered = trainable.reduce((n, pos) => (seenKeys.has(encodeParentKey(pos)) ? n + 1 : n), 0)
+        masteryByRep[rep.id] = Math.round((covered / trainable.length) * 100)
       }),
     )
     setRepertoireCounts(counts)
+    setRepertoireDueCounts(dueCounts)
+    setRepertoireMaxDepth(maxDepthByRep)
+    setRepertoireMastery(masteryByRep)
+    setRepertoireMainLineFens(mainLineFensByRep)
     return reps
   }, [])
 
@@ -783,7 +938,9 @@ export function BuildMode() {
   }, [currentFen, engineBuildOn, mode])
 
   useEffect(() => {
-    if (renameTarget) setRenameDraft(renameTarget.title)
+    if (!renameTarget) return
+    setRenameDraft(renameTarget.title)
+    setRenameDescriptionDraft(renameTarget.description ?? '')
   }, [renameTarget])
 
   useEffect(() => {
@@ -1478,6 +1635,22 @@ export function BuildMode() {
     await refreshChildren(activeRepertoireId, nextNodeId)
   }, [activeRepertoireId, path, refreshChildren])
 
+  const goToEnd = useCallback(async () => {
+    if (!activeRepertoireId) return
+    let cursorId = currentNodeId
+    let guard = 0
+    while (guard < 256) {
+      guard += 1
+      const kids = await listChildrenMoves({ repertoireId: activeRepertoireId, parentId: cursorId })
+      if (!kids.length) break
+      const main = pickMainLineChild(kids)
+      const target = main ?? kids[0]
+      if (!target) break
+      cursorId = target.id
+    }
+    await replayToPositionId(cursorId ?? null)
+  }, [activeRepertoireId, currentNodeId, replayToPositionId])
+
   const selectVariant = useCallback(async (move: Move) => {
     if (!activeRepertoireId) return
     const nextPath: Move[] = []
@@ -1494,6 +1667,14 @@ export function BuildMode() {
     setRevealed(null)
     await refreshChildren(activeRepertoireId, move.id)
   }, [activeRepertoireId, movesById, refreshChildren])
+
+  const goForward = useCallback(async () => {
+    if (!children.length) return
+    const main = pickMainLineChild(children)
+    const target = main ?? children[0]
+    if (!target) return
+    await selectVariant(target)
+  }, [children, selectVariant])
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -1847,11 +2028,11 @@ export function BuildMode() {
     trainTotal,
   ])
 
-  const handleCreate = async (title: string, side: Side): Promise<boolean> => {
+  const handleCreate = async (title: string, side: Side, description?: string): Promise<boolean> => {
     setBusy(true)
     setToast(null)
     try {
-      const id = await createRepertoire({ title, side })
+      const id = await createRepertoire({ title, side, description })
       await refreshRepertoireOverview()
       setActiveRepertoireId(id)
       setMode('build')
@@ -1878,6 +2059,86 @@ export function BuildMode() {
     a.click()
     URL.revokeObjectURL(url)
   }, [])
+
+  const onPromoteVariant = useCallback(
+    async (move: Move) => {
+      if (!activeRepertoireId) return
+      if (!move.id) return
+      setBusy(true)
+      setToast(null)
+      try {
+        await promoteVariation(move.id)
+        await refreshAllMoves(activeRepertoireId)
+        await refreshChildren(activeRepertoireId, move.parentId ?? null)
+        await refreshRepertoireOverview()
+      } catch {
+        setToast({ type: 'error', message: t({ en: 'Unable to promote this variation.', fr: 'Impossible de promouvoir cette variante.' }) })
+      } finally {
+        setBusy(false)
+      }
+    },
+    [activeRepertoireId, refreshAllMoves, refreshChildren, refreshRepertoireOverview, t],
+  )
+
+  const onMakeMainLine = useCallback(
+    async (move: Move) => {
+      if (!activeRepertoireId) return
+      if (!move.id) return
+      setBusy(true)
+      setToast(null)
+      try {
+        await promoteMoveToMainLine(move.id)
+        await refreshAllMoves(activeRepertoireId)
+        await refreshChildren(activeRepertoireId, move.parentId ?? null)
+        await refreshRepertoireOverview()
+      } catch {
+        setToast({ type: 'error', message: t({ en: 'Unable to set main line.', fr: 'Impossible de définir la ligne principale.' }) })
+      } finally {
+        setBusy(false)
+      }
+    },
+    [activeRepertoireId, refreshAllMoves, refreshChildren, refreshRepertoireOverview, t],
+  )
+
+  const onCopyVariantPgn = useCallback(
+    async (move: Move) => {
+      const byId = movesById
+      const pathFromRoot: Move[] = []
+      let cursor: Move | undefined = move
+      while (cursor) {
+        pathFromRoot.push(cursor)
+        cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined
+      }
+      pathFromRoot.reverse()
+
+      const childrenByParent = new Map<string | null, Move[]>()
+      for (const m of allMoves) {
+        const k = m.parentId ?? null
+        const list = childrenByParent.get(k)
+        if (list) list.push(m)
+        else childrenByParent.set(k, [m])
+      }
+
+      const continuation: Move[] = []
+      let parentId: string | null = move.id
+      while (parentId) {
+        const children = childrenByParent.get(parentId) ?? []
+        const main = pickMainLineChild(children)
+        if (!main) break
+        continuation.push(main)
+        parentId = main.id
+      }
+      const line = [...pathFromRoot, ...continuation]
+      const pgn = lineToPgnMoves(line)
+      try {
+        await navigator.clipboard.writeText(pgn)
+        setToast({ type: 'info', message: t({ en: 'Variation PGN copied.', fr: 'PGN de la variante copié.' }) })
+      } catch {
+        setToast({ type: 'error', message: t({ en: 'Unable to copy variation PGN.', fr: 'Impossible de copier le PGN de la variante.' }) })
+      }
+    },
+    [allMoves, movesById, t],
+  )
 
   const onDeleteMove = useCallback(
     async (move: Move) => {
@@ -1960,7 +2221,6 @@ export function BuildMode() {
   const saveMoveMeta = useCallback(async () => {
     if (!activeRepertoireId) return
     if (!selectedMove?.id) return
-    setBusy(true)
     setToast(null)
     try {
       await updateMove(selectedMove.id, {
@@ -1971,8 +2231,6 @@ export function BuildMode() {
       await refreshRepertoireOverview()
     } catch {
       setToast({ type: 'error', message: t({ en: 'Unable to save comment.', fr: "Impossible d'enregistrer le commentaire." }) })
-    } finally {
-      setBusy(false)
     }
   }, [
     activeRepertoireId,
@@ -1983,74 +2241,857 @@ export function BuildMode() {
     selectedMove?.id,
   ])
 
-  return (
-    <div className={['flex flex-1 flex-col gap-6 py-8', device.isMobile ? 'px-2 sm:px-4' : 'px-4'].join(' ')}>
-      {view === 'home' ? (
-        <div className="mx-auto w-full max-w-[920px] text-left">
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-3">
-                <img
-                  src={openingIslandIcon}
-                  alt=""
-                  width={48}
-                  height={48}
-                  className="h-12 w-12 shrink-0 rounded-xl object-cover shadow-sm"
-                />
-                <h1 className="text-2xl font-semibold tracking-tight text-[var(--text-h)]">Opening Island</h1>
-              </div>
-              <div className="mt-3 flex flex-wrap gap-3">
-                <button type="button" className="counter mb-0 text-sm" onClick={() => setImportOpen(true)}>
-                  {t({ en: 'Import repertoire', fr: 'Importer un répertoire' })}
-                </button>
-                <button type="button" className="counter mb-0 text-sm" onClick={() => setCreateRepertoireOpen(true)}>
-                  {t({ en: 'Create repertoire', fr: 'Créer un répertoire' })}
-                </button>
-              </div>
-            </div>
-            <UserProfileChrome placement="inline" />
-          </div>
+  useEffect(() => {
+    if (mode !== 'build') return
+    if (!selectedMove?.id) return
+    const currentNag = selectedMove.nag ?? ''
+    const currentComment = selectedMove.comment ?? ''
+    if (moveNagDraft === currentNag && moveCommentDraft === currentComment) return
+    const timer = window.setTimeout(() => {
+      void saveMoveMeta()
+    }, 260)
+    return () => window.clearTimeout(timer)
+  }, [mode, moveCommentDraft, moveNagDraft, saveMoveMeta, selectedMove?.comment, selectedMove?.id, selectedMove?.nag])
 
-          <div className="mt-6 rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-4 shadow-[var(--shadow)]">
-            <div className="space-y-5">
-              <HomeSection
-                title={t({ en: 'White', fr: 'Blanc' })}
-                sectionColorDot="white"
-                repertoires={whiteRepertoires}
-                repertoireCounts={repertoireCounts}
-                onOpen={(id) => {
-                  setActiveRepertoireId(id)
+  return (
+    <div
+      className={[
+        'flex flex-1 flex-col gap-6 py-8',
+        device.isMobile ? 'px-2 sm:px-4' : 'web-shell pl-[224px] pr-[30px] pt-[82px]',
+        !device.isMobile ? `web-theme-${visualTheme}` : '',
+      ].join(' ')}
+    >
+      {!device.isMobile ? (
+        <>
+          <header className="fixed left-0 right-0 top-0 z-[60] bg-[var(--primary)] px-4 py-2">
+            <div className="flex w-full items-center justify-between gap-3 pl-2 pr-1">
+              <div className="flex items-center gap-3">
+                <img src={openingIslandIcon} alt="" className="h-10 w-10 rounded-lg object-cover" />
+                <div className="rounded-xl border border-[var(--border)] bg-[var(--social-bg)] px-4 py-2 text-base font-bold tracking-tight text-[var(--text-h)]">
+                  Opening Grinder
+                </div>
+              </div>
+              <div className="flex items-center gap-2 px-1 py-1">
+                <div className="px-2 py-1 text-center text-sm font-medium text-white">
+                  {t({ en: 'Last sync', fr: 'Dernière synchro' })} {new Date().toLocaleDateString()}
+                </div>
+                <UserProfileChrome placement="inline" />
+              </div>
+            </div>
+          </header>
+          <aside className="fixed bottom-4 left-4 top-[74px] z-[55] w-[188px] rounded-2xl bg-[#eef2f7] p-3 shadow-[var(--shadow)]">
+            <nav className="space-y-2">
+              <button type="button" className={['web-nav-btn w-full', view === 'home' ? 'is-active' : ''].join(' ')} onClick={() => setView('home')}>
+                {t({ en: 'Home', fr: 'Accueil' })}
+              </button>
+              <button
+                type="button"
+                className={['web-nav-btn w-full', view === 'session' && mode === 'build' ? 'is-active' : ''].join(' ')}
+                onClick={() => {
+                  const fallbackId = activeRepertoireId ?? currentFocusRepertoire?.id ?? repertoires[0]?.id ?? null
+                  if (fallbackId) setActiveRepertoireId(fallbackId)
                   setMode('build')
                   setView('session')
                 }}
-                onExportPgn={handleExportPgn}
-                onShare={(id, title) => setShareTarget({ id, title })}
-                onRename={(r) => setRenameTarget(r)}
-                onDelete={(r) => setModal({ kind: 'confirmDeleteRepertoire', repertoire: r })}
-              />
-              <HomeSection
-                title={t({ en: 'Black', fr: 'Noir' })}
-                sectionColorDot="black"
-                repertoires={blackRepertoires}
-                repertoireCounts={repertoireCounts}
-                onOpen={(id) => {
-                  setActiveRepertoireId(id)
-                  setMode('build')
-                  setView('session')
-                }}
-                onExportPgn={handleExportPgn}
-                onShare={(id, title) => setShareTarget({ id, title })}
-                onRename={(r) => setRenameTarget(r)}
-                onDelete={(r) => setModal({ kind: 'confirmDeleteRepertoire', repertoire: r })}
-              />
+              >
+                {t({ en: 'Build', fr: 'Build' })}
+              </button>
+              <button
+                type="button"
+                className="web-nav-btn w-full"
+                onClick={() => setToast({ type: 'info', message: t({ en: 'Statistics panel coming in web shell.', fr: 'Le panneau statistiques arrive dans le shell web.' }) })}
+              >
+                {t({ en: 'Statistics', fr: 'Statistiques' })}
+              </button>
+              <button type="button" className="web-nav-btn w-full" onClick={() => setSettingsOpen(true)}>
+                {t({ en: 'Settings', fr: 'Paramètres' })}
+              </button>
+            </nav>
+          </aside>
+        </>
+      ) : null}
+      {view === 'home' ? (
+        device.isMobile ? (
+          <div className="mx-auto w-full max-w-[920px] text-left">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-3">
+                  <img
+                    src={openingIslandIcon}
+                    alt=""
+                    width={48}
+                    height={48}
+                    className="h-12 w-12 shrink-0 rounded-xl object-cover shadow-sm"
+                  />
+                  <h1 className="text-2xl font-semibold tracking-tight text-[var(--text-h)]">Opening Grinder</h1>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-3">
+                  <button type="button" className="counter mb-0 text-sm" onClick={() => setImportOpen(true)}>
+                    {t({ en: 'Import repertoire', fr: 'Importer un répertoire' })}
+                  </button>
+                  <button type="button" className="counter mb-0 text-sm" onClick={() => setCreateRepertoireOpen(true)}>
+                    {t({ en: 'Create repertoire', fr: 'Créer un répertoire' })}
+                  </button>
+                </div>
+              </div>
+              <UserProfileChrome placement="inline" />
+            </div>
+
+            <div className="mt-6 rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-4 shadow-[var(--shadow)]">
+              <div className="space-y-5">
+                <HomeSection
+                  title={t({ en: 'White', fr: 'Blanc' })}
+                  sectionColorDot="white"
+                  repertoires={whiteRepertoires}
+                  repertoireCounts={repertoireCounts}
+                  onOpen={(id) => {
+                    setActiveRepertoireId(id)
+                    setMode('build')
+                    setView('session')
+                  }}
+                  onExportPgn={handleExportPgn}
+                  onShare={(id, title) => setShareTarget({ id, title })}
+                  onRename={(r) => setRenameTarget(r)}
+                  onDelete={(r) => setModal({ kind: 'confirmDeleteRepertoire', repertoire: r })}
+                />
+                <HomeSection
+                  title={t({ en: 'Black', fr: 'Noir' })}
+                  sectionColorDot="black"
+                  repertoires={blackRepertoires}
+                  repertoireCounts={repertoireCounts}
+                  onOpen={(id) => {
+                    setActiveRepertoireId(id)
+                    setMode('build')
+                    setView('session')
+                  }}
+                  onExportPgn={handleExportPgn}
+                  onShare={(id, title) => setShareTarget({ id, title })}
+                  onRename={(r) => setRenameTarget(r)}
+                  onDelete={(r) => setModal({ kind: 'confirmDeleteRepertoire', repertoire: r })}
+                />
+              </div>
             </div>
           </div>
-        </div>
+        ) : !device.isMobile && mode === 'build' && false ? (
+          <div className="mx-auto grid w-full max-w-[1360px] grid-cols-[220px_1fr] gap-6">
+            <aside className="web-panel p-4 text-left">
+              <div className="mb-4 text-sm font-semibold tracking-tight text-[var(--text-h)]">{activeRepertoire?.title ?? '—'}</div>
+              <div className="flex items-center gap-2 pb-4">
+                <button
+                  type="button"
+                  className="web-nav-btn w-full"
+                  onClick={() => {
+                    if (!activeRepertoireId) return
+                    setModal({
+                      kind: 'trainStart',
+                      fullCount: trainPositions.length,
+                      selectionCount: selectionTrainPositions.length,
+                      hasSelection: currentNodeId != null,
+                    })
+                  }}
+                  disabled={!activeRepertoireId}
+                >
+                  {t({ en: 'Train', fr: 'Entraîner' })}
+                </button>
+                <button type="button" className="web-nav-btn w-full" onClick={() => setView('home')}>
+                  {t({ en: 'Home', fr: 'Accueil' })}
+                </button>
+              </div>
+              <div className="border-t border-[var(--border)] pt-4">
+                <MoveTreeView
+                  forest={forest}
+                  pathIds={pathToIdSet(path)}
+                  onSelectMove={selectVariant}
+                  onDeleteMove={onDeleteMove}
+                  onPromoteVariant={onPromoteVariant}
+                  onMakeMainLine={onMakeMainLine}
+                  onCopyVariantPgn={onCopyVariantPgn}
+                />
+              </div>
+            </aside>
+            <div className="grid grid-cols-[minmax(320px,430px)_minmax(540px,1fr)_minmax(260px,340px)] gap-4">
+              <section className="web-panel p-3">
+                <div className="mb-2 flex items-center justify-end gap-1">
+                  <button
+                    type="button"
+                    className="counter mb-0 inline-flex h-7 w-7 flex-shrink-0 items-center justify-center !p-0 leading-none"
+                    aria-label={t({ en: 'Board settings', fr: "Paramètres de l'échiquier" })}
+                    onClick={() => setSettingsOpen(true)}
+                  >
+                    <Settings className="h-[16px] w-[16px]" strokeWidth={2} aria-hidden />
+                  </button>
+                </div>
+                <div className="flex items-start gap-2">
+                  <div className="min-w-0 flex-1">
+                    <Board
+                      fen={currentFen}
+                      dests={isAnnotating ? new Map<Key, Key[]>() : boardDests}
+                      turnColor={turnColor}
+                      orientation={boardOrientation}
+                      onMove={isAnnotating ? undefined : onBoardMoveBuild}
+                      lastMove={undefined}
+                      selectedSquare={annotationTool === 'arrow' ? pendingArrowFrom : null}
+                      drawableEnabled={showBoardAnnotations}
+                      drawableVisible={showBoardAnnotations && mode === 'build'}
+                      shapes={currentShapes}
+                      annotationAutoShapes={annotationPreviewAutoShapes}
+                      onShapesChange={(next) => {
+                        setShapesByFen((prev) => ({ ...prev, [currentFen]: next }))
+                      }}
+                      annotationMode={isAnnotating}
+                      annotateVariant={isAnnotating ? (annotationTool === 'arrow' ? 'arrow' : 'circle') : null}
+                      onAnnotateStart={onAnnotateStart}
+                      onAnnotateMove={onAnnotateMove}
+                      onAnnotateEnd={onAnnotateEnd}
+                      touchMoveMode={false}
+                    />
+                    <div className="mt-2 flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1 rounded-md border border-red-500 px-1">
+                        <button
+                          type="button"
+                          className="counter mb-0 inline-flex h-7 w-7 items-center justify-center !p-0"
+                          title={t({ en: 'Go to start', fr: 'Revenir au début' })}
+                          onClick={() => void goToRoot()}
+                        >
+                          «
+                        </button>
+                        <button
+                          type="button"
+                          className="counter mb-0 inline-flex h-7 w-7 items-center justify-center !p-0"
+                          title={t({ en: 'Previous move', fr: 'Coup précédent' })}
+                          onClick={() => void goBack()}
+                        >
+                          ‹
+                        </button>
+                        <button
+                          type="button"
+                          className="counter mb-0 inline-flex h-7 w-7 items-center justify-center !p-0"
+                          title={t({ en: 'Next move', fr: 'Coup suivant' })}
+                          onClick={() => void goForward()}
+                        >
+                          ›
+                        </button>
+                        <button
+                          type="button"
+                          className="counter mb-0 inline-flex h-7 w-7 items-center justify-center !p-0"
+                          title={t({ en: 'Go to end', fr: 'Aller à la fin' })}
+                          onClick={() => void goToEnd()}
+                        >
+                          »
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-1 rounded-md border-2 border-red-500 px-1 py-0.5">
+                        <button
+                          type="button"
+                          className={[
+                            'm-0 inline-flex self-start items-start justify-start p-0 leading-none transition-transform active:scale-90',
+                            annotationBrush === 'red'
+                              ? 'text-red-600'
+                              : annotationBrush === 'blue'
+                                ? 'text-blue-600'
+                                : 'text-emerald-600',
+                          ].join(' ')}
+                          onClick={() =>
+                            setAnnotationBrush((prev) => {
+                              const i = ANNOTATION_BRUSH_CYCLE.indexOf(
+                                prev as (typeof ANNOTATION_BRUSH_CYCLE)[number],
+                              )
+                              return ANNOTATION_BRUSH_CYCLE[i === -1 ? 0 : (i + 1) % ANNOTATION_BRUSH_CYCLE.length]
+                            })
+                          }
+                          title={t({
+                            en: 'Annotation color: click to cycle Green -> Red -> Blue.',
+                            fr: "Couleur d'annotation : clique pour alterner Vert -> Rouge -> Bleu.",
+                          })}
+                        >
+                          <Circle className="h-4 w-4" fill="currentColor" strokeWidth={1.6} aria-hidden />
+                        </button>
+                        <button
+                          type="button"
+                          className={[
+                            'counter mb-0 inline-flex h-7 w-7 items-center justify-center !p-0',
+                            annotationTool === 'arrow'
+                              ? 'border-red-500 bg-[var(--accent-bg)] text-[var(--accent)] ring-2 ring-red-300'
+                              : '',
+                          ].join(' ')}
+                          aria-pressed={annotationTool === 'arrow'}
+                          onClick={() => setAnnotationTool((tool) => (tool === 'arrow' ? 'none' : 'arrow'))}
+                          title={t({
+                            en: 'Arrow tool: click source then destination square. Click again to disable.',
+                            fr: 'Outil flèche : clique la case de départ puis la case d’arrivée. Reclique pour désactiver.',
+                          })}
+                        >
+                          <ArrowUpRight className="h-3 w-3" strokeWidth={2.25} aria-hidden />
+                        </button>
+                        <button
+                          type="button"
+                          className={[
+                            'counter mb-0 inline-flex h-7 w-7 items-center justify-center !p-0',
+                            annotationTool === 'circle'
+                              ? 'border-red-500 bg-[var(--accent-bg)] text-[var(--accent)] ring-2 ring-red-300'
+                              : '',
+                          ].join(' ')}
+                          aria-pressed={annotationTool === 'circle'}
+                          onClick={() => setAnnotationTool((tool) => (tool === 'circle' ? 'none' : 'circle'))}
+                          title={t({
+                            en: 'Circle tool: click a square to toggle a circle. Click again to disable.',
+                            fr: 'Outil cercle : clique une case pour ajouter/enlever un cercle. Reclique pour désactiver.',
+                          })}
+                        >
+                          <Circle className="h-3 w-3" strokeWidth={2.25} aria-hidden />
+                        </button>
+                        <button
+                          type="button"
+                          className={[
+                            'counter mb-0 inline-flex h-7 w-7 self-center items-center justify-center rounded-full border border-[var(--border)] !p-0 transition-transform active:scale-90',
+                            annotationBrush === 'red'
+                              ? 'bg-red-600'
+                              : annotationBrush === 'blue'
+                                ? 'bg-blue-600'
+                                : 'bg-emerald-600',
+                          ].join(' ')}
+                          style={{ color: '#fff' }}
+                          onClick={() =>
+                            setAnnotationBrush((prev) => {
+                              const i = ANNOTATION_BRUSH_CYCLE.indexOf(prev as (typeof ANNOTATION_BRUSH_CYCLE)[number])
+                              return ANNOTATION_BRUSH_CYCLE[i === -1 ? 0 : (i + 1) % ANNOTATION_BRUSH_CYCLE.length]
+                            })
+                          }
+                          title={t({
+                            en: 'Annotation color: click to cycle Green -> Red -> Blue.',
+                            fr: "Couleur d'annotation : clique pour alterner Vert -> Rouge -> Bleu.",
+                          })}
+                        >
+                          <span className="h-3 w-3 rounded-full bg-white/90" aria-hidden />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  <aside className="w-[88px] shrink-0 rounded-lg border border-[var(--border)] bg-[var(--bg)] p-2 text-center">
+                    <div className="text-[10px] font-semibold uppercase tracking-wide opacity-70">Stockfish</div>
+                    <button
+                      type="button"
+                      className={[
+                        'mx-auto mt-2 inline-flex h-7 w-7 items-center justify-center rounded-full',
+                        engineBuildOn ? 'bg-emerald-500/20 text-emerald-600' : 'bg-[var(--code-bg)] text-[var(--text)]',
+                      ].join(' ')}
+                      aria-pressed={engineBuildOn}
+                      onClick={() => setEngineBuildOn((v) => !v)}
+                      title={t({ en: 'Engine on/off', fr: 'Moteur on/off' })}
+                    >
+                      <Power className="h-3.5 w-3.5" aria-hidden />
+                    </button>
+                    <div className="mt-2 text-xs font-semibold text-[var(--text-h)]">
+                      {engineBuildOn ? (positionEvalBusy ? '…' : formatEval(positionEval)) : 'OFF'}
+                    </div>
+                    <div className="mt-2 h-16">
+                      <EvalBar eval={positionEval} bottomColor={boardOrientation} className="mx-auto h-full min-h-0 w-2" />
+                    </div>
+                  </aside>
+                </div>
+              </section>
+              <section className="web-panel p-3 text-left">
+                <OpeningExplorer
+                  fen={currentFen}
+                  collapsed={openingExplorerCollapsed}
+                  onToggleCollapsed={() => setOpeningExplorerCollapsed((v) => !v)}
+                  onPlayMove={(uci) => void onPlayExplorerMove(uci)}
+                  stockfishActive={engineBuildOn}
+                  stockfishEvaluateFen={engineBuildOn ? stockfishEvaluateFen : undefined}
+                />
+              </section>
+              <section className="web-panel p-3 text-left">
+                <div className="mb-2 text-sm font-semibold text-[var(--text-h)]">{t({ en: 'Analysis', fr: 'Analyse' })}</div>
+                {selectedMove ? (
+                  <div className="rounded-md border border-[var(--border)] bg-[var(--bg)] p-3 text-left text-sm">
+                    <div className="text-xs font-medium text-[var(--text-h)]">{t({ en: 'Move', fr: 'Coup' })}</div>
+                    <div className="mt-1 font-mono text-[var(--text-h)]">
+                      {selectedMove?.notation}
+                      {formatNagForInline(selectedMove?.nag)}
+                    </div>
+                    <div className="mt-0.5">
+                      <div className="mb-0.5 text-[6px] font-medium text-[var(--text-h)]">{t({ en: 'PGN annotation', fr: 'Annotation PGN' })}</div>
+                      <div className="flex flex-wrap gap-0">
+                        {['', '!', '?', '!!', '??', '!?', '?!', '=', '+/=', '=/+', '+-', '-+', '∞'].map((nag) => (
+                          <button
+                            key={nag || 'none'}
+                            type="button"
+                            className={[
+                              'counter min-w-[20px] !px-0.5 !py-0 text-[6px]',
+                              moveNagDraft === nag ? 'border-[var(--accent)] bg-[var(--accent-bg)] text-[var(--accent)]' : '',
+                            ].join(' ')}
+                            disabled={busy}
+                            onClick={() => setMoveNagDraft(nag)}
+                            title={nag || t({ en: 'No annotation', fr: 'Aucune annotation' })}
+                          >
+                            {nag || '∅'}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm opacity-80">
+                    {t({ en: 'Select a move to display details.', fr: 'Sélectionne un coup pour afficher les détails.' })}
+                  </div>
+                )}
+              </section>
+            </div>
+          </div>
+        ) : !device.isMobile && mode === 'build' && false ? (
+          <div className="mx-auto grid w-full max-w-[1360px] grid-cols-[300px_460px_1fr] gap-4">
+            <aside className="web-panel p-4 text-left">
+              <div className="mb-3 text-xs font-medium uppercase tracking-wide opacity-70">
+                {t({ en: 'Current repertoire', fr: 'Répertoire actif' })}
+              </div>
+              <select
+                className="w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--text-h)]"
+                value={activeRepertoireId ?? ''}
+                onChange={(e) => {
+                  const nextId = e.target.value
+                  if (!nextId) return
+                  setActiveRepertoireId(nextId)
+                  setMode('build')
+                }}
+              >
+                {repertoires.map((rep) => (
+                  <option key={rep.id} value={rep.id}>
+                    {rep.title}
+                  </option>
+                ))}
+              </select>
+              <div className="mt-3 grid grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  className="web-nav-btn w-full justify-center"
+                  onClick={() => {
+                    if (!activeRepertoireId) return
+                    setModal({
+                      kind: 'trainStart',
+                      fullCount: trainPositions.length,
+                      selectionCount: selectionTrainPositions.length,
+                      hasSelection: currentNodeId != null,
+                    })
+                  }}
+                  disabled={!activeRepertoireId}
+                >
+                  {t({ en: 'Train', fr: 'Entraîner' })}
+                </button>
+                <button
+                  type="button"
+                  className="web-nav-btn w-full justify-center"
+                  onClick={() =>
+                    setModal({
+                      kind: 'puzzleStart',
+                      hasSelection: currentNodeId != null,
+                    })
+                  }
+                  disabled={!activeRepertoireId || trainPositions.length === 0}
+                >
+                  {t({ en: 'Puzzles', fr: 'Puzzles' })}
+                </button>
+                <button type="button" className="web-nav-btn w-full justify-center" onClick={() => setView('home')}>
+                  {t({ en: 'Home', fr: 'Accueil' })}
+                </button>
+              </div>
+              <div className="mt-4 border-t border-[var(--border)] pt-4">
+                <MoveTreeView
+                  forest={forest}
+                  pathIds={pathToIdSet(path)}
+                  onSelectMove={selectVariant}
+                  onDeleteMove={onDeleteMove}
+                  onPromoteVariant={onPromoteVariant}
+                  onMakeMainLine={onMakeMainLine}
+                  onCopyVariantPgn={onCopyVariantPgn}
+                />
+              </div>
+            </aside>
+
+            <section className="web-panel p-3">
+              <div className="flex items-center gap-3">
+                <aside className="flex w-12 shrink-0 flex-col gap-2 rounded-md border border-[var(--border)] bg-[var(--bg)] p-1.5">
+                  <button
+                    type="button"
+                    className={[
+                      'inline-flex h-8 w-8 items-center justify-center rounded-[6px] border-2 transition-colors',
+                      annotationTool === 'arrow'
+                        ? 'border-red-500 bg-[var(--accent-bg)] text-[var(--accent)] ring-2 ring-red-300'
+                        : 'border-transparent text-[var(--text)] opacity-80 hover:bg-[var(--code-bg)]',
+                    ].join(' ')}
+                    aria-pressed={annotationTool === 'arrow'}
+                    title={t({
+                      en: 'Arrow tool: click source then destination square. Click again to disable.',
+                      fr: 'Outil flèche : clique la case de départ puis la case d’arrivée. Reclique pour désactiver.',
+                    })}
+                    onClick={() => setAnnotationTool((tool) => (tool === 'arrow' ? 'none' : 'arrow'))}
+                  >
+                    <ArrowUpRight className="h-4 w-4" strokeWidth={2.25} aria-hidden />
+                  </button>
+                  <button
+                    type="button"
+                    className={[
+                      'inline-flex h-8 w-8 items-center justify-center rounded-[6px] border-2 transition-colors',
+                      annotationTool === 'circle'
+                        ? 'border-red-500 bg-[var(--accent-bg)] text-[var(--accent)] ring-2 ring-red-300'
+                        : 'border-transparent text-[var(--text)] opacity-80 hover:bg-[var(--code-bg)]',
+                    ].join(' ')}
+                    aria-pressed={annotationTool === 'circle'}
+                    title={t({
+                      en: 'Circle tool: click a square to toggle a circle. Click again to disable.',
+                      fr: 'Outil cercle : clique une case pour ajouter/enlever un cercle. Reclique pour désactiver.',
+                    })}
+                    onClick={() => setAnnotationTool((tool) => (tool === 'circle' ? 'none' : 'circle'))}
+                  >
+                    <Circle className="h-4 w-4" strokeWidth={2.25} aria-hidden />
+                  </button>
+                  <button
+                    type="button"
+                    className={[
+                      'inline-flex h-8 w-8 self-center items-center justify-center rounded-full border border-[var(--border)] transition-transform active:scale-90',
+                      annotationBrush === 'red'
+                        ? 'bg-red-600'
+                        : annotationBrush === 'blue'
+                          ? 'bg-blue-600'
+                          : 'bg-emerald-600',
+                    ].join(' ')}
+                    title={t({ en: 'Cycle annotation color', fr: "Changer la couleur d'annotation" })}
+                    onClick={() =>
+                      setAnnotationBrush((prev) => {
+                        const i = ANNOTATION_BRUSH_CYCLE.indexOf(
+                          prev as (typeof ANNOTATION_BRUSH_CYCLE)[number],
+                        )
+                        return ANNOTATION_BRUSH_CYCLE[i === -1 ? 0 : (i + 1) % ANNOTATION_BRUSH_CYCLE.length]
+                      })
+                    }
+                  >
+                    <span className="h-3 w-3 rounded-full bg-white/90" aria-hidden />
+                  </button>
+                  <button
+                    type="button"
+                    className="counter mb-0 inline-flex h-8 w-8 items-center justify-center !p-0 leading-none"
+                    aria-label={t({ en: 'Board settings', fr: "Paramètres de l'échiquier" })}
+                    onClick={() => setSettingsOpen(true)}
+                  >
+                    <Settings className="h-[16px] w-[16px]" strokeWidth={2} aria-hidden />
+                  </button>
+                </aside>
+                <div className="flex-1">
+                  <Board
+                    fen={currentFen}
+                    dests={isAnnotating ? new Map<Key, Key[]>() : boardDests}
+                    turnColor={turnColor}
+                    orientation={boardOrientation}
+                    onMove={isAnnotating ? undefined : onBoardMoveBuild}
+                    lastMove={undefined}
+                    selectedSquare={annotationTool === 'arrow' ? pendingArrowFrom : null}
+                    drawableEnabled={showBoardAnnotations}
+                    drawableVisible={showBoardAnnotations && mode === 'build'}
+                    shapes={currentShapes}
+                    annotationAutoShapes={annotationPreviewAutoShapes}
+                    onShapesChange={(next) => {
+                      setShapesByFen((prev) => ({ ...prev, [currentFen]: next }))
+                    }}
+                    annotationMode={isAnnotating}
+                    annotateVariant={isAnnotating ? (annotationTool === 'arrow' ? 'arrow' : 'circle') : null}
+                    onAnnotateStart={onAnnotateStart}
+                    onAnnotateMove={onAnnotateMove}
+                    onAnnotateEnd={onAnnotateEnd}
+                    touchMoveMode={false}
+                  />
+                </div>
+              </div>
+            </section>
+
+            <section className="space-y-3 text-left">
+              <div className="web-panel p-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <div className="text-sm font-semibold text-[var(--text-h)]">Stockfish</div>
+                  <button
+                    type="button"
+                    className={[
+                      'counter mb-0 inline-flex h-7 w-7 items-center justify-center !p-0 leading-none',
+                      engineBuildOn ? 'border-[var(--accent)] bg-[var(--accent-bg)] text-[var(--accent)]' : '',
+                    ].join(' ')}
+                    aria-pressed={engineBuildOn}
+                    aria-label="Analyse Stockfish"
+                    onClick={() => setEngineBuildOn((v) => !v)}
+                  >
+                    <Brain className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
+                  </button>
+                </div>
+                <div className="flex items-center gap-3">
+                  <div className="text-2xl font-semibold tracking-tight text-[var(--text-h)]">
+                    {positionEvalBusy ? '…' : formatEval(positionEval)}
+                  </div>
+                  <div className="h-20">
+                    <EvalBar eval={positionEval} bottomColor={boardOrientation} className="min-h-0 w-3 h-full" />
+                  </div>
+                </div>
+                <div className="mt-2 text-xs opacity-75">
+                  {engineBuildOn
+                    ? t({ en: 'Live eval on current position.', fr: 'Evaluation en direct sur la position actuelle.' })
+                    : t({ en: 'Enable engine for live eval.', fr: "Active le moteur pour l'évaluation en direct." })}
+                </div>
+              </div>
+              <div className="web-panel p-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <div className="text-sm font-semibold text-[var(--text-h)]">{t({ en: 'Opening explorer', fr: 'Explorateur d’ouvertures' })}</div>
+                  <UserProfileChrome placement="inline" />
+                </div>
+                <OpeningExplorer
+                  fen={currentFen}
+                  collapsed={openingExplorerCollapsed}
+                  onToggleCollapsed={() => setOpeningExplorerCollapsed((v) => !v)}
+                  onPlayMove={(uci) => void onPlayExplorerMove(uci)}
+                  stockfishActive={engineBuildOn}
+                  stockfishEvaluateFen={engineBuildOn ? stockfishEvaluateFen : undefined}
+                />
+              </div>
+            </section>
+          </div>
+        ) : (
+          <div className="w-full text-left">
+            <section className="space-y-4">
+              <div className="flex items-start gap-3">
+                <div className="web-dashboard-card w-fit max-w-[980px] rounded-[22px] bg-[#edf2f8] pb-2">
+                  <div className="mb-1.5 flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className="rounded-xl bg-[#dfe5ec] p-3 text-[var(--text-h)]">♟</div>
+                      <div>
+                        <div className="text-xs font-medium uppercase tracking-wide opacity-65">
+                          {t({ en: 'Current focus', fr: 'Focus actuel' })}
+                        </div>
+                        <div className="text-[22px] font-bold tracking-tight text-[var(--text-h)]">
+                          {currentFocusRepertoire?.title ?? '—'}
+                        </div>
+                        {currentFocusRepertoire?.description ? (
+                          <div className="mt-1 text-xs italic text-[var(--text)] opacity-75">{currentFocusRepertoire.description}</div>
+                        ) : null}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <div className="text-center">
+                        <div className="text-xl font-bold text-[var(--text-h)]">
+                          {currentFocusRepertoire ? `${repertoireMastery[currentFocusRepertoire.id] ?? 0}%` : '0%'}
+                        </div>
+                        <div className="text-[10px] font-semibold uppercase tracking-wider opacity-65">Mastery</div>
+                      </div>
+                      <div className="p-1">
+                        <RepertoirePreviewBoard
+                          fen={currentFocusRepertoire ? repertoireMainLineFens[currentFocusRepertoire.id] ?? new Chess().fen() : new Chess().fen()}
+                          orientation={currentFocusRepertoire?.side ?? 'white'}
+                          sizeClassName="h-[64px] w-[64px]"
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        className="rounded-full bg-[var(--primary)] px-4 py-1.5 text-xs font-semibold text-white"
+                        onClick={() => {
+                          if (!currentFocusRepertoire) return
+                          setActiveRepertoireId(currentFocusRepertoire.id)
+                          setMode('build')
+                          setView('session')
+                          window.setTimeout(() => {
+                            setModal({
+                              kind: 'trainStart',
+                              fullCount: trainPositions.length,
+                              selectionCount: selectionTrainPositions.length,
+                              hasSelection: currentNodeId != null,
+                            })
+                          }, 0)
+                        }}
+                      >
+                        {t({ en: 'Train Now', fr: 'Train' })}
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded-full bg-[#dfe5ec] px-4 py-1.5 text-xs font-semibold text-[var(--text-h)]"
+                        onClick={() => {
+                          if (!currentFocusRepertoire) return
+                          setActiveRepertoireId(currentFocusRepertoire.id)
+                          setMode('build')
+                          setView('session')
+                          window.setTimeout(() => {
+                            setModal({
+                              kind: 'puzzleStart',
+                              hasSelection: currentNodeId != null,
+                            })
+                          }, 0)
+                        }}
+                      >
+                        {t({ en: 'Puzzles', fr: 'Puzzles' })}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div className="ml-auto flex flex-nowrap items-center justify-end gap-2 self-center">
+                  <button
+                    type="button"
+                    className="rounded-full bg-[var(--primary)] px-4 py-1.5 text-xs font-semibold whitespace-nowrap text-white"
+                    onClick={() => setCreateRepertoireOpen(true)}
+                  >
+                    {t({ en: 'Create repertoire', fr: 'Créer un répertoire' })}
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-full bg-[var(--primary)] px-4 py-1.5 text-xs font-semibold whitespace-nowrap text-white"
+                    onClick={() => setImportOpen(true)}
+                  >
+                    {t({ en: 'Import repertoire', fr: 'Importer un répertoire' })}
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-full bg-[var(--primary)] px-4 py-1.5 text-xs font-semibold whitespace-nowrap text-white"
+                    onClick={() =>
+                      setToast({
+                        type: 'info',
+                        message: t({
+                          en: 'Repertoire explorer panel is coming next.',
+                          fr: 'Le panneau exploration des répertoires arrive ensuite.',
+                        }),
+                      })
+                    }
+                  >
+                    {t({ en: 'Explore repertoires', fr: 'Explorer les répertoires' })}
+                  </button>
+                </div>
+              </div>
+              <div className="flex items-center justify-between pl-3">
+                <h2 className="m-0 text-4xl font-bold tracking-tight text-[var(--text-h)]">
+                  {t({ en: 'Active Repertoires', fr: 'Répertoires actifs' })}
+                </h2>
+              </div>
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+                {[...whiteRepertoires, ...blackRepertoires].map((rep) => (
+                  <div
+                    key={rep.id}
+                    className="web-dashboard-card rounded-[22px] bg-[var(--social-bg)] text-left"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => {
+                      setActiveRepertoireId(rep.id)
+                      setMode('build')
+                      setView('session')
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key !== 'Enter' && e.key !== ' ') return
+                      e.preventDefault()
+                      setActiveRepertoireId(rep.id)
+                      setMode('build')
+                      setView('session')
+                    }}
+                  >
+                    <div className="mb-4 flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <div className="min-w-0 whitespace-normal text-[24px] font-bold leading-tight tracking-tight break-words text-[var(--text-h)]">
+                            {rep.title}
+                          </div>
+                          <span
+                            className={[
+                              'inline-flex rounded-md px-2 py-1 text-[11px] font-semibold leading-none',
+                              rep.side === 'white' ? 'border border-neutral-300 bg-white text-black' : 'bg-black text-white',
+                            ].join(' ')}
+                          >
+                            {rep.side === 'white' ? t({ en: 'White', fr: 'Blanc' }) : t({ en: 'Black', fr: 'Noir' })}
+                          </span>
+                        </div>
+                        {rep.description ? (
+                          <div className="mt-0.5 text-[11px] italic break-words text-[var(--text)] opacity-75">{rep.description}</div>
+                        ) : null}
+                      </div>
+                      <div className="rounded-xl bg-[#f2f4f8] px-3 py-1.5 text-sm font-bold text-[var(--primary)]">
+                        {repertoireMastery[rep.id] ?? 0}%
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-[12px]">
+                      <div className="p-1">
+                        <RepertoirePreviewBoard
+                          fen={repertoireMainLineFens[rep.id] ?? new Chess().fen()}
+                          orientation={rep.side}
+                          sizeClassName="h-[74px] w-[74px]"
+                        />
+                      </div>
+                      <div className="space-y-1 px-1 py-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <span>{t({ en: 'Max depth', fr: 'Profondeur max' })}</span>
+                          <strong>{repertoireMaxDepth[rep.id] ?? 0}</strong>
+                        </div>
+                        <div className="flex items-center justify-between gap-2">
+                          <span>{t({ en: 'Positions', fr: 'Positions' })}</span>
+                          <strong>{repertoireCounts[rep.id] ?? 0}</strong>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mt-4 flex items-center justify-between border-t border-[var(--border)] pt-3 text-[11px]">
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          className="inline-flex h-7 w-7 items-center justify-center rounded text-[var(--text)] opacity-70 hover:bg-[var(--accent-bg)] hover:text-[var(--accent)] hover:opacity-100"
+                          title={t({ en: 'Rename', fr: 'Renommer' })}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setRenameTarget(rep)
+                          }}
+                        >
+                          <Pencil className="h-3.5 w-3.5" aria-hidden />
+                        </button>
+                        <button
+                          type="button"
+                          className="inline-flex h-7 w-7 items-center justify-center rounded text-[var(--text)] opacity-70 hover:bg-red-500/15 hover:text-red-600 hover:opacity-100 dark:hover:text-red-400"
+                          title={t({ en: 'Delete repertoire', fr: 'Supprimer le répertoire' })}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setModal({ kind: 'confirmDeleteRepertoire', repertoire: rep })
+                          }}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" aria-hidden />
+                        </button>
+                        <button
+                          type="button"
+                          className="inline-flex h-7 w-7 items-center justify-center rounded text-[var(--text)] opacity-70 hover:bg-[var(--accent-bg)] hover:text-[var(--accent)] hover:opacity-100"
+                          title={t({ en: 'Download PGN', fr: 'Télécharger PGN' })}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            void handleExportPgn(rep.id)
+                          }}
+                        >
+                          <Download className="h-3.5 w-3.5" aria-hidden />
+                        </button>
+                        <button
+                          type="button"
+                          className="inline-flex h-7 w-7 items-center justify-center rounded text-[var(--text)] opacity-70 hover:bg-[var(--accent-bg)] hover:text-[var(--accent)] hover:opacity-100"
+                          title={t({ en: 'Share', fr: 'Partager' })}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setShareTarget({ id: rep.id, title: rep.title })
+                          }}
+                        >
+                          <Share2 className="h-3.5 w-3.5" aria-hidden />
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="opacity-70">
+                          {t({ en: 'Last train:', fr: 'Dernier entraînement :' })} {formatLastTrainLabel(rep.lastTrainDayKey, t)}
+                        </span>
+                        <span className="rounded-lg bg-[#ffe7dc] px-2 py-1 font-semibold text-[#8d3c1a]">
+                          {t({ en: '{count} due', fr: '{count} à revoir' }, { count: repertoireDueCounts[rep.id] ?? 0 })}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          </div>
+        )
       ) : (
         <>
-          <div className="mx-auto flex w-full max-w-[1126px] justify-end">
-            <UserProfileChrome placement="inline" />
-          </div>
+          {device.isMobile ? (
+            <div className="mx-auto flex w-full max-w-[1126px] justify-end">
+              <UserProfileChrome placement="inline" />
+            </div>
+          ) : null}
           {mode === 'train' ? (
           <div className={['mx-auto w-full', device.isMobile ? 'max-w-none px-0' : 'max-w-[420px]'].join(' ')}>
             <div className="rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-2.5 shadow-[var(--shadow)] sm:p-3">
@@ -2417,10 +3458,12 @@ export function BuildMode() {
         ) : (
           <div
             className={[
-              'mx-auto w-full max-w-[1126px] gap-6',
+              'w-full gap-4',
               device.isMobile && mode === 'build'
                 ? 'flex flex-col pb-[calc(4.25rem+env(safe-area-inset-bottom,0px))]'
-                : 'grid grid-cols-1 lg:grid-cols-[340px_1fr]',
+                : !device.isMobile && mode === 'build'
+                  ? 'grid grid-cols-[30%_50%_20%] pr-[30px]'
+                  : 'grid grid-cols-1 lg:grid-cols-[340px_1fr]',
             ].join(' ')}
           >
             <aside
@@ -2430,28 +3473,34 @@ export function BuildMode() {
                 device.isMobile && mode === 'build' && mobileBuildTab !== 'tree' ? 'hidden' : '',
               ].join(' ')}
             >
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex min-w-0 flex-1 items-center gap-2">
-                  <span className="truncate text-sm font-medium leading-none text-black dark:text-neutral-100">
-                    {activeRepertoire?.title ?? '—'}
-                  </span>
-                  {activeRepertoire?.side ? (
-                    <span
-                      className={[
-                        'h-2.5 w-2.5 shrink-0 rounded-full border',
-                        activeRepertoire.side === 'white'
-                          ? 'border-neutral-400 bg-white shadow-sm'
-                          : 'border-neutral-800 bg-neutral-900 dark:border-neutral-600 dark:bg-neutral-950',
-                      ].join(' ')}
-                      title={activeRepertoire.side === 'white' ? t({ en: 'White', fr: 'Blancs' }) : t({ en: 'Black', fr: 'Noirs' })}
-                      aria-label={activeRepertoire.side === 'white' ? t({ en: 'White', fr: 'Blancs' }) : t({ en: 'Black', fr: 'Noirs' })}
-                    />
-                  ) : null}
+              {!device.isMobile && mode === 'build' ? (
+                <div className="mb-3">
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-wide opacity-70">
+                    {t({ en: 'Current repertoire', fr: 'Répertoire actif' })}
+                  </div>
+                  <select
+                    className="w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-2 py-1.5 text-sm text-[var(--text-h)]"
+                    value={activeRepertoireId ?? ''}
+                    onChange={(e) => {
+                      const nextId = e.target.value
+                      if (!nextId) return
+                      setActiveRepertoireId(nextId)
+                      setMode('build')
+                    }}
+                  >
+                    {repertoires.map((rep) => (
+                      <option key={rep.id} value={rep.id}>
+                        {rep.title}
+                      </option>
+                    ))}
+                  </select>
                 </div>
+              ) : null}
+              <div className="flex items-center justify-start gap-3">
                 <div className="flex shrink-0 items-center gap-2">
                   <button
                     type="button"
-                    className="counter mb-0 inline-flex items-center"
+                    className="mb-0 inline-flex h-9 items-center rounded-md bg-[var(--primary)] px-3 text-sm font-semibold text-white"
                     onClick={() => {
                       if (!activeRepertoireId) return
                       setModal({
@@ -2467,14 +3516,7 @@ export function BuildMode() {
                   </button>
                   <button
                     type="button"
-                    className="counter mb-0 inline-flex items-center"
-                    onClick={() => setView('home')}
-                  >
-                    Home
-                  </button>
-                  <button
-                    type="button"
-                    className="counter mb-0 inline-flex items-center"
+                    className="mb-0 inline-flex h-9 items-center rounded-md bg-[var(--accent-bg)] px-3 text-sm font-semibold text-[var(--accent)]"
                     onClick={() =>
                       setModal({
                         kind: 'puzzleStart',
@@ -2515,105 +3557,58 @@ export function BuildMode() {
                   pathIds={pathToIdSet(path)}
                   onSelectMove={selectVariant}
                   onDeleteMove={onDeleteMove}
+                  onPromoteVariant={onPromoteVariant}
+                  onMakeMainLine={onMakeMainLine}
+                  onCopyVariantPgn={onCopyVariantPgn}
                 />
               </div>
 
               {mode === 'build' && selectedMove ? (
                 <div className="mt-4 rounded-md border border-[var(--border)] bg-[var(--bg)] p-3 text-left text-sm">
-                  <div className="text-xs font-medium text-[var(--text-h)]">{t({ en: 'Move', fr: 'Coup' })}</div>
-                  <div className="mt-1 font-mono text-[var(--text-h)]">
-                    {selectedMove.notation}
-                    {formatNagForInline(selectedMove.nag)}
+                  <div className="text-sm text-[var(--text-h)]">
+                    {t({ en: 'Move:', fr: 'Coup :' })}{' '}
+                    <span className="font-mono font-bold text-[var(--text-h)]">
+                      {selectedMove.notation}
+                      {formatNagForInline(moveNagDraft || selectedMove.nag)}
+                    </span>
                   </div>
 
-                  <label className="mt-3 block text-xs font-medium text-[var(--text-h)]" htmlFor="nagSelect">
+                  <label className="mt-0.5 block text-xs font-medium text-[var(--text-h)]" htmlFor="nagSelect">
                     {t({ en: 'PGN annotation', fr: 'Annotation PGN' })}
                   </label>
-                  <select
-                    id="nagSelect"
-                    className="mt-2 w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2"
-                    value={moveNagDraft}
-                    onChange={(e) => setMoveNagDraft(e.target.value)}
-                    disabled={busy}
-                  >
-                    <option value="">{t({ en: '(none)', fr: '(aucune)' })}</option>
-                    <option value="!">!</option>
-                    <option value="?">?</option>
-                    <option value="!!">!!</option>
-                    <option value="??">??</option>
-                    <option value="!?">!?</option>
-                    <option value="?!">?!</option>
-                    <option value="=">=</option>
-                    <option value="+/=">+/=</option>
-                    <option value="=/+">=/+</option>
-                    <option value="+-">+-</option>
-                    <option value="-+">-+</option>
-                    <option value="∞">∞</option>
-                  </select>
+                  <div className="mt-0.5 flex flex-nowrap gap-0.5 overflow-x-auto">
+                    {['', '!', '?', '!!', '??', '!?', '?!', '=', '+/=', '=/+', '+-', '-+', '∞'].map((nag) => (
+                      <button
+                        key={nag || 'none'}
+                        type="button"
+                        className={[
+                          'counter min-w-[20px] !px-0.5 !py-0 text-[6px] leading-none',
+                          moveNagDraft === nag ? 'border-[var(--accent)] bg-[var(--accent-bg)] text-[var(--accent)]' : '',
+                        ].join(' ')}
+                        disabled={busy}
+                        onClick={() => setMoveNagDraft(nag)}
+                        title={nag || t({ en: 'No annotation', fr: 'Aucune annotation' })}
+                      >
+                        {nag || '∅'}
+                      </button>
+                    ))}
+                  </div>
 
                   <label
-                    className="mt-3 block text-xs font-medium text-[var(--text-h)]"
+                    className="mt-1 block text-sm font-medium text-[var(--text-h)]"
                     htmlFor="commentInput"
                   >
                     {t({ en: 'Comment', fr: 'Commentaire' })}
                   </label>
                   <textarea
                     id="commentInput"
-                    className="mt-2 w-full resize-none rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2"
+                    className="mt-1 w-full resize-none rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2"
                     rows={3}
                     value={moveCommentDraft}
                     onChange={(e) => setMoveCommentDraft(e.target.value)}
                     disabled={busy}
                   />
 
-                  <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-                    {selectedMove.isMainLine ? (
-                      <span className="text-xs font-medium text-[var(--accent)]">Ligne principale</span>
-                    ) : (
-                      <span className="text-xs opacity-60">{t({ en: 'Variation', fr: 'Variante' })}</span>
-                    )}
-                    {(() => {
-                      const sibs = allMoves.filter((m) => m.parentId === selectedMove.parentId)
-                      if (sibs.length < 2) return null
-                      if (selectedMove.isMainLine) return null
-                      return (
-                        <button
-                          type="button"
-                          className="counter !px-2 !py-1 text-xs"
-                          disabled={busy}
-                          onClick={() => {
-                            const moveId = selectedMove.id
-                            const parentId = selectedMove.parentId
-                            if (!moveId) return
-                            void (async () => {
-                              setBusy(true)
-                              setToast(null)
-                              try {
-                                await promoteMoveToMainLine(moveId)
-                                if (activeRepertoireId) {
-                                  await refreshAllMoves(activeRepertoireId)
-                                  await refreshChildren(activeRepertoireId, parentId)
-                                  await refreshRepertoireOverview()
-                                }
-                              } catch {
-                                setToast({ type: 'error', message: t({ en: 'Unable to set main line.', fr: 'Impossible de définir la ligne principale.' }) })
-                              } finally {
-                                setBusy(false)
-                              }
-                            })()
-                          }}
-                        >
-                          Définir comme ligne principale
-                        </button>
-                      )
-                    })()}
-                  </div>
-
-                  <div className="mt-3 flex justify-end">
-                    <button type="button" className="counter" disabled={busy} onClick={() => void saveMoveMeta()}>
-                      Save
-                    </button>
-                  </div>
                 </div>
               ) : null}
 
@@ -2637,97 +3632,98 @@ export function BuildMode() {
             >
               <div
                 className={[
-                  'mx-auto w-full',
-                  device.isMobile ? 'max-w-none' : 'max-w-[420px]',
+                  'w-full',
+                  device.isMobile ? 'max-w-none' : 'mx-auto max-w-[80%]',
                 ].join(' ')}
               >
                 <div className="mb-3 flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      className={[
-                        'inline-flex h-3.5 w-3.5 flex-shrink-0 items-center justify-center rounded-full shadow-sm transition-transform active:scale-90',
-                        annotationBrush === 'red'
-                          ? 'bg-red-600 hover:bg-red-500'
-                          : annotationBrush === 'blue'
-                            ? 'bg-blue-600 hover:bg-blue-500'
-                            : 'bg-emerald-600 hover:bg-emerald-500',
-                      ].join(' ')}
-                      aria-label={`Couleur ${annotationBrush} (clic pour changer)`}
-                      title="Couleur — clic pour faire défiler vert, rouge, bleu"
-                      onClick={() =>
-                        setAnnotationBrush((prev) => {
-                          const i = ANNOTATION_BRUSH_CYCLE.indexOf(
-                            prev as (typeof ANNOTATION_BRUSH_CYCLE)[number],
-                          )
-                          return ANNOTATION_BRUSH_CYCLE[i === -1 ? 0 : (i + 1) % ANNOTATION_BRUSH_CYCLE.length]
-                        })
-                      }
-                    />
-                    <button
-                      type="button"
-                      className={[
-                        'inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-[5px] border-2 leading-none text-[var(--text-h)] transition-colors',
-                        annotationTool === 'arrow'
-                          ? 'border-transparent bg-[var(--accent-bg)] text-[var(--accent)] hover:border-[var(--accent-border)]'
-                          : 'border-transparent bg-transparent opacity-60 hover:bg-[var(--accent-bg)] hover:opacity-100 hover:text-[var(--accent)]',
-                      ].join(' ')}
-                      onClick={() => setAnnotationTool((t) => (t === 'arrow' ? 'none' : 'arrow'))}
-                      aria-pressed={annotationTool === 'arrow'}
-                      title="Flèches (glisser)"
-                    >
-                      <ArrowUpRight className="h-3 w-3" strokeWidth={2.25} aria-hidden />
-                    </button>
-                    <button
-                      type="button"
-                      className={[
-                        'inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-[5px] border-2 leading-none text-[var(--text-h)] transition-colors',
-                        annotationTool === 'circle'
-                          ? 'border-transparent bg-[var(--accent-bg)] text-[var(--accent)] hover:border-[var(--accent-border)]'
-                          : 'border-transparent bg-transparent opacity-60 hover:bg-[var(--accent-bg)] hover:opacity-100 hover:text-[var(--accent)]',
-                      ].join(' ')}
-                      onClick={() => setAnnotationTool((t) => (t === 'circle' ? 'none' : 'circle'))}
-                      aria-pressed={annotationTool === 'circle'}
-                      title="Cercles (1 clic)"
-                    >
-                      <Circle className="h-3 w-3" strokeWidth={2.25} aria-hidden />
-                    </button>
+                  <div className="text-xs font-semibold uppercase tracking-wide opacity-70">
+                    {t({ en: 'Board workspace', fr: "Espace échiquier" })}
                   </div>
-                  <div className="flex shrink-0 items-center gap-1">
-                    <button
-                      type="button"
-                      className={[
-                        'counter mb-0 inline-flex h-7 w-7 flex-shrink-0 items-center justify-center !p-0 leading-none',
-                        engineBuildOn ? 'border-[var(--accent)] bg-[var(--accent-bg)] text-[var(--accent)]' : '',
-                      ].join(' ')}
-                      aria-pressed={engineBuildOn}
-                      aria-label="Analyse Stockfish"
-                      title="Analyse Stockfish (position + arbre d’ouverture)"
-                      onClick={() => setEngineBuildOn((v) => !v)}
-                    >
-                      <Brain className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
-                    </button>
+                  <div className="flex shrink-0 items-center gap-4">
+                    {!device.isMobile && mode === 'build' ? (
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          className={[
+                            'counter mb-0 inline-flex h-7 w-7 items-center justify-center !p-0 transition-transform active:scale-90',
+                          ].join(' ')}
+                          style={{
+                            color:
+                              annotationBrush === 'red'
+                                ? '#dc2626'
+                                : annotationBrush === 'blue'
+                                  ? '#2563eb'
+                                  : '#059669',
+                          }}
+                          onClick={() =>
+                            setAnnotationBrush((prev) => {
+                              const i = ANNOTATION_BRUSH_CYCLE.indexOf(
+                                prev as (typeof ANNOTATION_BRUSH_CYCLE)[number],
+                              )
+                              return ANNOTATION_BRUSH_CYCLE[i === -1 ? 0 : (i + 1) % ANNOTATION_BRUSH_CYCLE.length]
+                            })
+                          }
+                          title={t({
+                            en: 'Annotation color: click to cycle Green -> Red -> Blue.',
+                            fr: "Couleur d'annotation : clique pour alterner Vert -> Rouge -> Bleu.",
+                          })}
+                        >
+                          <Circle className="h-4 w-4" fill="currentColor" strokeWidth={1.6} aria-hidden />
+                        </button>
+                        <button
+                          type="button"
+                          className={[
+                            'counter mb-0 inline-flex h-7 w-7 items-center justify-center !p-0',
+                            annotationTool === 'arrow'
+                              ? 'border-red-500 bg-[var(--accent-bg)] text-[var(--accent)] ring-2 ring-red-300'
+                              : '',
+                          ].join(' ')}
+                          aria-pressed={annotationTool === 'arrow'}
+                          onClick={() => setAnnotationTool((tool) => (tool === 'arrow' ? 'none' : 'arrow'))}
+                          title={t({
+                            en: 'Arrow tool: click source then destination square. Click again to disable.',
+                            fr: 'Outil flèche : clique la case de départ puis la case d’arrivée. Reclique pour désactiver.',
+                          })}
+                        >
+                          <ArrowUpRight className="h-3 w-3" strokeWidth={2.25} aria-hidden />
+                        </button>
+                        <button
+                          type="button"
+                          className={[
+                            'counter mb-0 inline-flex h-7 w-7 items-center justify-center !p-0',
+                            annotationTool === 'circle'
+                              ? 'border-red-500 bg-[var(--accent-bg)] text-[var(--accent)] ring-2 ring-red-300'
+                              : '',
+                          ].join(' ')}
+                          aria-pressed={annotationTool === 'circle'}
+                          onClick={() => setAnnotationTool((tool) => (tool === 'circle' ? 'none' : 'circle'))}
+                          title={t({
+                            en: 'Circle tool: click a square to toggle a circle. Click again to disable.',
+                            fr: 'Outil cercle : clique une case pour ajouter/enlever un cercle. Reclique pour désactiver.',
+                          })}
+                        >
+                          <Circle className="h-3 w-3" strokeWidth={2.25} aria-hidden />
+                        </button>
+                      </div>
+                    ) : null}
                     <button
                       type="button"
                       className="counter mb-0 inline-flex h-7 w-7 flex-shrink-0 items-center justify-center !p-0 leading-none"
                       aria-label={t({ en: 'Board settings', fr: "Paramètres de l'échiquier" })}
-                      title={t({ en: 'Settings', fr: 'Paramètres' })}
                       onClick={() => setSettingsOpen(true)}
                     >
                       <Settings className="h-[18px] w-[18px]" strokeWidth={2} aria-hidden />
                     </button>
                   </div>
                 </div>
-                <div className="flex items-stretch justify-center gap-2">
-                  {engineBuildOn && mode === 'build' ? (
-                    <div className="flex w-11 shrink-0 flex-col items-center gap-1 self-stretch pt-0.5">
-                      <div className="min-h-[2.25rem] text-center font-mono text-[10px] leading-tight text-[var(--text-h)]">
-                        {positionEvalBusy ? '…' : formatEval(positionEval)}
-                      </div>
-                      <EvalBar eval={positionEval} className="min-h-0 w-3 flex-1" />
+                <div className="flex items-stretch gap-3">
+                  {!device.isMobile && mode === 'build' ? (
+                    <div className="w-[10px] shrink-0">
+                      <EvalBar eval={positionEval} bottomColor={boardOrientation} className="h-full min-h-0 w-full" />
                     </div>
                   ) : null}
-                  <div className={engineBuildOn && mode === 'build' ? 'min-w-0 flex-1' : 'w-full'}>
+                  <div className="flex-1">
                     <Board
                       fen={currentFen}
                       dests={isAnnotating ? new Map<Key, Key[]>() : boardDests}
@@ -2754,8 +3750,48 @@ export function BuildMode() {
                     />
                   </div>
                 </div>
+                {!device.isMobile && mode === 'build' ? (
+                  <>
+                    <div className="mt-4 flex flex-col items-center gap-2">
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          className="counter mb-0 inline-flex h-7 w-7 items-center justify-center !p-0"
+                          title={t({ en: 'Go to start', fr: 'Revenir au début' })}
+                          onClick={() => void goToRoot()}
+                        >
+                          «
+                        </button>
+                        <button
+                          type="button"
+                          className="counter mb-0 inline-flex h-7 w-7 items-center justify-center !p-0"
+                          title={t({ en: 'Previous move', fr: 'Coup précédent' })}
+                          onClick={() => void goBack()}
+                        >
+                          ‹
+                        </button>
+                        <button
+                          type="button"
+                          className="counter mb-0 inline-flex h-7 w-7 items-center justify-center !p-0"
+                          title={t({ en: 'Next move', fr: 'Coup suivant' })}
+                          onClick={() => void goForward()}
+                        >
+                          ›
+                        </button>
+                        <button
+                          type="button"
+                          className="counter mb-0 inline-flex h-7 w-7 items-center justify-center !p-0"
+                          title={t({ en: 'Go to end', fr: 'Aller à la fin' })}
+                          onClick={() => void goToEnd()}
+                        >
+                          »
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                ) : null}
 
-                {mode === 'build' ? (
+                {mode === 'build' && device.isMobile ? (
                   <OpeningExplorer
                     fen={currentFen}
                     collapsed={openingExplorerCollapsed}
@@ -2767,6 +3803,69 @@ export function BuildMode() {
                 ) : null}
               </div>
             </main>
+
+            {!device.isMobile && mode === 'build' ? (
+              <div className="space-y-3">
+                <section className="rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-3 text-left shadow-[var(--shadow)]">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="text-xs font-semibold uppercase tracking-wide opacity-70">{STOCKFISH_VERSION_LABEL}</div>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        className="counter mb-0 inline-flex h-7 w-7 items-center justify-center !p-0"
+                        title={t({ en: 'Engine settings', fr: 'Paramètres moteur' })}
+                        onClick={() =>
+                          setToast({
+                            type: 'info',
+                            message: t({
+                              en: 'Engine settings will be available soon.',
+                              fr: 'Les paramètres du moteur seront disponibles bientôt.',
+                            }),
+                          })
+                        }
+                      >
+                        <Settings className="h-3.5 w-3.5" aria-hidden />
+                      </button>
+                      <button
+                        type="button"
+                        className="counter mb-0 inline-flex h-7 w-7 items-center justify-center !p-0"
+                        aria-pressed={engineBuildOn}
+                        title={t({ en: 'Engine on/off', fr: 'Moteur on/off' })}
+                        onClick={() => setEngineBuildOn((v) => !v)}
+                      >
+                        <Power className="h-3.5 w-3.5" aria-hidden />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="mt-2 flex items-end gap-4">
+                    {engineBuildOn ? (
+                      <div className="text-[36px] font-semibold leading-none tracking-tight text-[var(--text-h)]">
+                        {positionEvalBusy ? '…' : formatEval(positionEval)}
+                      </div>
+                    ) : (
+                      <div className="text-[26px] font-semibold leading-none tracking-tight text-[var(--text-h)]">OFF</div>
+                    )}
+                    <div className="pb-1 text-sm font-semibold opacity-80">
+                      {t({ en: 'Depth {depth}', fr: 'Profondeur {depth}' }, { depth: engineBuildOn ? (positionEval?.depth ?? '—') : '—' })}
+                    </div>
+                  </div>
+                  <div className="mt-2 h-2 rounded-full bg-[var(--code-bg)]">
+                    <div className="h-full w-[72%] rounded-full bg-[var(--text-h)]" />
+                  </div>
+                  <div className="mt-3 truncate text-sm font-medium text-[var(--text-h)]">
+                    {engineBuildOn ? stockfishPvLine : '—'}
+                  </div>
+                </section>
+                <OpeningExplorer
+                  fen={currentFen}
+                  collapsed={openingExplorerCollapsed}
+                  onToggleCollapsed={() => setOpeningExplorerCollapsed((v) => !v)}
+                  onPlayMove={(uci) => void onPlayExplorerMove(uci)}
+                  stockfishActive={engineBuildOn}
+                  stockfishEvaluateFen={engineBuildOn ? stockfishEvaluateFen : undefined}
+                />
+              </div>
+            ) : null}
 
             {device.isMobile && mode === 'build' ? (
               <nav
@@ -3244,11 +4343,15 @@ export function BuildMode() {
                 onClick={() => {
                   const nextTitle = renameDraft.trim().slice(0, 80)
                   if (!nextTitle || !renameTarget) return
+                  const nextDescription = renameDescriptionDraft.trim().slice(0, 140)
                   void (async () => {
                     setBusy(true)
                     setToast(null)
                     try {
-                      await updateRepertoireTitle(renameTarget.id, nextTitle)
+                      await updateRepertoireMetadata(renameTarget.id, {
+                        title: nextTitle,
+                        description: nextDescription || undefined,
+                      })
                       await refreshRepertoireOverview()
                       if (activeRepertoireId === renameTarget.id) {
                         const rep = await getRepertoire(renameTarget.id)
@@ -3278,6 +4381,17 @@ export function BuildMode() {
             onChange={(e) => setRenameDraft(e.target.value)}
             maxLength={80}
             autoFocus
+          />
+          <label className="mt-3 block text-sm text-[var(--text-h)]" htmlFor="rename-rep-description">
+            {t({ en: 'Subtitle', fr: 'Sous-titre' })}
+          </label>
+          <input
+            id="rename-rep-description"
+            className="mt-2 w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm italic"
+            value={renameDescriptionDraft}
+            onChange={(e) => setRenameDescriptionDraft(e.target.value)}
+            maxLength={140}
+            placeholder={t({ en: 'Optional short description', fr: 'Description courte optionnelle' })}
           />
         </ModalFrame>
       ) : null}
@@ -3312,8 +4426,8 @@ export function BuildMode() {
         open={createRepertoireOpen}
         busy={busy}
         onClose={() => setCreateRepertoireOpen(false)}
-        onSubmit={async (title, side) => {
-          const ok = await handleCreate(title, side)
+        onSubmit={async (title, side, description) => {
+          const ok = await handleCreate(title, side, description)
           if (ok) setView('session')
           return ok
         }}
@@ -3355,7 +4469,7 @@ function ModalFrame({
   const { t } = useI18n()
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 md:bottom-0 md:left-[208px] md:right-0 md:top-[74px]"
       role="dialog"
       aria-modal="true"
     >
@@ -3512,9 +4626,8 @@ function SettingsPopup({
           <div className="flex flex-wrap gap-1.5">
             {(
               [
-                ['violet', t({ en: 'Violet (default)', fr: 'Violet (défaut)' })],
-                ['acid_blue', t({ en: 'Acid blue', fr: 'Bleu acide' })],
-                ['dark_contrast', t({ en: 'High-contrast dark', fr: 'Sombre contrasté' })],
+                ['soft_pro', t({ en: 'Soft Pro (Lumina Gambit)', fr: 'Soft Pro (Lumina Gambit)' })],
+                ['high_contrast', t({ en: 'High Contrast (Analytical Monolith)', fr: 'High Contrast (Analytical Monolith)' })],
               ] as const
             ).map(([id, label]) => (
               <button
@@ -3602,6 +4715,30 @@ function ToggleRow({
   )
 }
 
+function RepertoirePreviewBoard({
+  fen,
+  orientation,
+  sizeClassName,
+}: {
+  fen: string
+  orientation: 'white' | 'black'
+  sizeClassName: string
+}) {
+  return (
+    <div className={['repertoire-preview pointer-events-none overflow-hidden rounded-md', sizeClassName].join(' ')}>
+      <Board
+        fen={fen}
+        dests={EMPTY_DESTS}
+        turnColor="white"
+        orientation={orientation}
+        showCoordinates={false}
+        showDests={false}
+        touchMoveMode
+      />
+    </div>
+  )
+}
+
 function HomeSection({
   title,
   sectionColorDot,
@@ -3663,6 +4800,7 @@ function HomeSection({
                 <div className="min-w-0 truncate text-left text-sm font-medium text-[var(--text-h)]">
                   {r.title}
                 </div>
+                {r.description ? <div className="truncate text-xs italic opacity-70">{r.description}</div> : null}
                 <div className="mt-0.5 w-full text-left text-xs opacity-80 hover:opacity-100">
                   {t({ en: '{count} saved positions', fr: '{count} positions enregistrées' }, { count: repertoireCounts[r.id] ?? 0 })}
                 </div>
@@ -3757,15 +4895,17 @@ function CreateRepertoireModal({
   open: boolean
   busy: boolean
   onClose: () => void
-  onSubmit: (title: string, side: Side) => Promise<boolean>
+  onSubmit: (title: string, side: Side, description?: string) => Promise<boolean>
 }) {
   const { t } = useI18n()
   const [title, setTitle] = useState('')
+  const [description, setDescription] = useState('')
   const [side, setSide] = useState<Side>('white')
 
   useEffect(() => {
     if (!open) return
     setTitle('')
+    setDescription('')
     setSide('white')
   }, [open])
 
@@ -3788,7 +4928,7 @@ function CreateRepertoireModal({
             disabled={busy || !title.trim()}
             onClick={() => {
               void (async () => {
-                const ok = await onSubmit(title.trim(), side)
+                const ok = await onSubmit(title.trim(), side, description.trim() || undefined)
                 if (ok) onClose()
               })()
             }}
@@ -3812,6 +4952,20 @@ function CreateRepertoireModal({
             maxLength={80}
             disabled={busy}
             autoFocus
+          />
+        </div>
+        <div>
+          <label className="block text-xs font-medium opacity-90" htmlFor="create-rep-description">
+            {t({ en: 'Short description', fr: 'Description courte' })}
+          </label>
+          <input
+            id="create-rep-description"
+            className="mt-1.5 w-full rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm italic"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder={t({ en: 'e.g. Practical anti-Sicilian lines', fr: 'ex : Lignes pratiques anti-Sicilienne' })}
+            maxLength={140}
+            disabled={busy}
           />
         </div>
         <div>
