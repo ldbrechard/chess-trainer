@@ -121,7 +121,7 @@ export async function promoteVariation(moveId: string): Promise<void> {
   if (siblings.length < 2) return
   const otherTimes = siblings
     .filter((s) => s.id !== m.id)
-    .map((s) => Date.parse(s.createdAt))
+    .map((s) => (s.createdAt ? Date.parse(s.createdAt) : Number.NaN))
     .filter((n) => Number.isFinite(n))
   if (otherTimes.length === 0) return
   const minOther = Math.min(...otherTimes)
