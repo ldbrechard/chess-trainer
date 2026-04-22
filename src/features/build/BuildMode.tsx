@@ -3,12 +3,11 @@ import {
   ArrowUpRight,
   Brain,
   Check,
+  ChevronLeft,
   Circle,
   Download,
   Eye,
   Flame,
-  LayoutGrid,
-  ListTree,
   Pencil,
   Power,
   Settings,
@@ -378,12 +377,12 @@ function lineToPgnMoves(moves: Move[]): string {
   return tokens.join(' ')
 }
 
-type MobileBuildTab = 'tree' | 'board'
+type MobileBuildTab = 'tree' | 'explorer' | 'train' | 'settings'
 
 export function BuildMode() {
   const { t } = useI18n()
   const device = useDevice()
-  const [mobileBuildTab, setMobileBuildTab] = useState<MobileBuildTab>('board')
+  const [mobileBuildTab, setMobileBuildTab] = useState<MobileBuildTab>('tree')
   const [view, setView] = useState<View>('home')
   const [importOpen, setImportOpen] = useState(false)
   const [createRepertoireOpen, setCreateRepertoireOpen] = useState(false)
@@ -874,11 +873,11 @@ export function BuildMode() {
   }, [mode])
 
   useEffect(() => {
-    if (!device.isMobile) setMobileBuildTab('board')
+    if (!device.isMobile) setMobileBuildTab('tree')
   }, [device.isMobile])
 
   useEffect(() => {
-    if (device.isMobile && view === 'session' && mode === 'build') setMobileBuildTab('board')
+    if (device.isMobile && view === 'session' && mode === 'build') setMobileBuildTab('tree')
   }, [activeRepertoireId, device.isMobile, mode, view])
 
   useEffect(() => {
@@ -2257,8 +2256,12 @@ export function BuildMode() {
     <div
       className={[
         'flex flex-1 flex-col gap-6 py-8',
-        device.isMobile ? 'px-2 sm:px-4' : 'web-shell pl-[224px] pr-[30px] pt-[82px]',
-        !device.isMobile ? `web-theme-${visualTheme}` : '',
+        device.isMobile
+          ? mode === 'build'
+            ? 'px-2 sm:px-4 web-shell'
+            : 'px-2 sm:px-4'
+          : 'web-shell pl-[224px] pr-[30px] pt-[82px]',
+        !device.isMobile || (device.isMobile && mode === 'build') ? `web-theme-${visualTheme}` : '',
       ].join(' ')}
     >
       {!device.isMobile ? (
@@ -2311,7 +2314,7 @@ export function BuildMode() {
         </>
       ) : null}
       {view === 'home' ? (
-        device.isMobile ? (
+        false ? (
           <div className="mx-auto w-full max-w-[920px] text-left">
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div className="min-w-0 flex-1">
@@ -3087,12 +3090,276 @@ export function BuildMode() {
         )
       ) : (
         <>
-          {device.isMobile ? (
+          {device.isMobile && mode !== 'build' ? (
             <div className="mx-auto flex w-full max-w-[1126px] justify-end">
               <UserProfileChrome placement="inline" />
             </div>
           ) : null}
-          {mode === 'train' ? (
+          {device.isMobile && mode === 'build' ? (
+            <div className="mx-auto flex h-[calc(100svh-6rem)] w-full max-w-none flex-col">
+              <section className="shrink-0 rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-3 shadow-[var(--shadow)]">
+                <div className="grid grid-cols-[auto_1fr_auto] items-center gap-2">
+                  <button
+                    type="button"
+                    className="counter mb-0 inline-flex h-8 w-8 items-center justify-center !p-0"
+                    aria-label={t({ en: 'Back to home', fr: "Retour à l'accueil" })}
+                    onClick={() => setView('home')}
+                  >
+                    <ChevronLeft className="h-4 w-4" strokeWidth={2.25} aria-hidden />
+                  </button>
+                  <div className="truncate text-center text-xs font-semibold uppercase tracking-wide text-[var(--text-h)] opacity-70">
+                    {activeRepertoire?.title ?? '—'}
+                  </div>
+                  <div className="flex items-center justify-end gap-1">
+                    <button
+                      type="button"
+                      className={[
+                        'counter mb-0 inline-flex h-8 w-8 items-center justify-center !p-0',
+                        annotationBrush === 'red'
+                          ? 'text-red-600'
+                          : annotationBrush === 'blue'
+                            ? 'text-blue-600'
+                            : 'text-emerald-600',
+                      ].join(' ')}
+                      onClick={() =>
+                        setAnnotationBrush((prev) => {
+                          const i = ANNOTATION_BRUSH_CYCLE.indexOf(prev as (typeof ANNOTATION_BRUSH_CYCLE)[number])
+                          return ANNOTATION_BRUSH_CYCLE[i === -1 ? 0 : (i + 1) % ANNOTATION_BRUSH_CYCLE.length]
+                        })
+                      }
+                      title={t({
+                        en: 'Annotation color: click to cycle Green -> Red -> Blue.',
+                        fr: "Couleur d'annotation : clique pour alterner Vert -> Rouge -> Bleu.",
+                      })}
+                    >
+                      <Circle className="h-4 w-4" fill="currentColor" strokeWidth={1.6} aria-hidden />
+                    </button>
+                    <button
+                      type="button"
+                      className={[
+                        'counter mb-0 inline-flex h-8 w-8 items-center justify-center !p-0',
+                        annotationTool === 'arrow'
+                          ? 'border-[var(--accent)] bg-[var(--accent-bg)] text-[var(--accent)] ring-2 ring-[var(--accent-border)]'
+                          : '',
+                      ].join(' ')}
+                      aria-pressed={annotationTool === 'arrow'}
+                      onClick={() => setAnnotationTool((tool) => (tool === 'arrow' ? 'none' : 'arrow'))}
+                      title={t({
+                        en: 'Arrow tool: click source then destination square. Click again to disable.',
+                        fr: 'Outil flèche : clique la case de départ puis la case d’arrivée. Reclique pour désactiver.',
+                      })}
+                    >
+                      <ArrowUpRight className="h-3.5 w-3.5" strokeWidth={2.25} aria-hidden />
+                    </button>
+                    <button
+                      type="button"
+                      className={[
+                        'counter mb-0 inline-flex h-8 w-8 items-center justify-center !p-0',
+                        annotationTool === 'circle'
+                          ? 'border-[var(--accent)] bg-[var(--accent-bg)] text-[var(--accent)] ring-2 ring-[var(--accent-border)]'
+                          : '',
+                      ].join(' ')}
+                      aria-pressed={annotationTool === 'circle'}
+                      onClick={() => setAnnotationTool((tool) => (tool === 'circle' ? 'none' : 'circle'))}
+                      title={t({
+                        en: 'Circle tool: click a square to toggle a circle. Click again to disable.',
+                        fr: 'Outil cercle : clique une case pour ajouter/enlever un cercle. Reclique pour désactiver.',
+                      })}
+                    >
+                      <Circle className="h-3.5 w-3.5" strokeWidth={2.25} aria-hidden />
+                    </button>
+                  </div>
+                </div>
+                {mobileBuildTab !== 'settings' ? (
+                  <>
+                    <div className="mt-2 w-full">
+                      <Board
+                        fen={currentFen}
+                        dests={isAnnotating ? new Map<Key, Key[]>() : boardDests}
+                        turnColor={turnColor}
+                        orientation={boardOrientation}
+                        onMove={isAnnotating ? undefined : onBoardMoveBuild}
+                        lastMove={undefined}
+                        selectedSquare={annotationTool === 'arrow' ? pendingArrowFrom : null}
+                        drawableEnabled={showBoardAnnotations}
+                        drawableVisible={showBoardAnnotations}
+                        shapes={currentShapes}
+                        annotationAutoShapes={annotationPreviewAutoShapes}
+                        onShapesChange={(next) => {
+                          setShapesByFen((prev) => ({ ...prev, [currentFen]: next }))
+                        }}
+                        annotationMode={isAnnotating}
+                        annotateVariant={isAnnotating ? (annotationTool === 'arrow' ? 'arrow' : 'circle') : null}
+                        onAnnotateStart={onAnnotateStart}
+                        onAnnotateMove={onAnnotateMove}
+                        onAnnotateEnd={onAnnotateEnd}
+                        touchMoveMode
+                      />
+                    </div>
+                    <div className="mt-2 flex items-center justify-center gap-1">
+                      <button
+                        type="button"
+                        className="counter mb-0 inline-flex h-7 w-7 items-center justify-center !p-0"
+                        title={t({ en: 'Go to start', fr: 'Revenir au début' })}
+                        onClick={() => void goToRoot()}
+                      >
+                        «
+                      </button>
+                      <button
+                        type="button"
+                        className="counter mb-0 inline-flex h-7 w-7 items-center justify-center !p-0"
+                        title={t({ en: 'Previous move', fr: 'Coup précédent' })}
+                        onClick={() => void goBack()}
+                      >
+                        ‹
+                      </button>
+                      <button
+                        type="button"
+                        className="counter mb-0 inline-flex h-7 w-7 items-center justify-center !p-0"
+                        title={t({ en: 'Next move', fr: 'Coup suivant' })}
+                        onClick={() => void goForward()}
+                      >
+                        ›
+                      </button>
+                      <button
+                        type="button"
+                        className="counter mb-0 inline-flex h-7 w-7 items-center justify-center !p-0"
+                        title={t({ en: 'Go to end', fr: 'Aller à la fin' })}
+                        onClick={() => void goToEnd()}
+                      >
+                        »
+                      </button>
+                    </div>
+                  </>
+                ) : null}
+              </section>
+
+              <section className="mt-3 flex-1 overflow-y-auto pb-[calc(3.75rem+env(safe-area-inset-bottom,0px))]">
+                {mobileBuildTab === 'tree' ? (
+                  <MoveTreeView
+                    forest={forest}
+                    pathIds={pathToIdSet(path)}
+                    onSelectMove={selectVariant}
+                    onDeleteMove={onDeleteMove}
+                    onPromoteVariant={onPromoteVariant}
+                    onMakeMainLine={onMakeMainLine}
+                    onCopyVariantPgn={onCopyVariantPgn}
+                  />
+                ) : null}
+
+                {mobileBuildTab === 'explorer' ? (
+                  <div className="rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-3 shadow-[var(--shadow)]">
+                    <OpeningExplorer
+                      fen={currentFen}
+                      collapsed={openingExplorerCollapsed}
+                      onToggleCollapsed={() => setOpeningExplorerCollapsed((v) => !v)}
+                      onPlayMove={(uci) => void onPlayExplorerMove(uci)}
+                      stockfishActive={engineBuildOn}
+                      stockfishEvaluateFen={engineBuildOn ? stockfishEvaluateFen : undefined}
+                      onToggleStockfish={() => setEngineBuildOn((v) => !v)}
+                    />
+                  </div>
+                ) : null}
+
+                {mobileBuildTab === 'train' ? (
+                  <div className="rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-3 shadow-[var(--shadow)]">
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        className="mb-0 inline-flex h-9 items-center rounded-md bg-[var(--primary)] px-3 text-sm font-semibold text-white"
+                        onClick={() => {
+                          if (!activeRepertoireId) return
+                          setModal({
+                            kind: 'trainStart',
+                            fullCount: trainPositions.length,
+                            selectionCount: selectionTrainPositions.length,
+                            hasSelection: currentNodeId != null,
+                          })
+                        }}
+                        disabled={!activeRepertoireId}
+                      >
+                        Train
+                      </button>
+                      <button
+                        type="button"
+                        className="mb-0 inline-flex h-9 items-center rounded-md bg-[var(--accent-bg)] px-3 text-sm font-semibold text-[var(--accent)]"
+                        onClick={() =>
+                          setModal({
+                            kind: 'puzzleStart',
+                            hasSelection: currentNodeId != null,
+                          })
+                        }
+                        disabled={!activeRepertoireId || trainPositions.length === 0}
+                        title={t({ en: 'Puzzles linked to repertoire', fr: 'Puzzles liés au répertoire' })}
+                      >
+                        Puzzles
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
+                {mobileBuildTab === 'settings' ? (
+                  <div className="space-y-2 rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-3 shadow-[var(--shadow)]">
+                    <div className="text-xs font-semibold uppercase tracking-wide text-[var(--text-h)] opacity-70">
+                      {t({ en: 'Board settings', fr: "Paramètres de l'échiquier" })}
+                    </div>
+                    <ToggleRow
+                      label={t({ en: 'Flip board', fr: "Inverser l'orientation" })}
+                      checked={flipBoard}
+                      onChange={() => setFlipBoard((v) => !v)}
+                    />
+                    <ToggleRow
+                      label={t({ en: 'Show legal moves', fr: 'Montrer les coups légaux' })}
+                      checked={showDests}
+                      onChange={() => setShowDests((v) => !v)}
+                    />
+                    <ToggleRow
+                      label={t({ en: 'Visual annotations', fr: 'Annotations visuelles' })}
+                      checked={showBoardAnnotations}
+                      onChange={() => setShowBoardAnnotations((v) => !v)}
+                    />
+                    <button
+                      type="button"
+                      className="counter mb-0 mt-2 inline-flex items-center gap-2 text-xs"
+                      onClick={() => setSettingsOpen(true)}
+                    >
+                      <Settings className="h-3.5 w-3.5" aria-hidden />
+                      {t({ en: 'More settings', fr: 'Plus de paramètres' })}
+                    </button>
+                  </div>
+                ) : null}
+              </section>
+
+              <nav
+                className="fixed bottom-0 left-0 right-0 z-[70] grid grid-cols-4 border-t border-[var(--border)] bg-[var(--bg)] pb-[env(safe-area-inset-bottom,0px)]"
+                role="tablist"
+                aria-label={t({ en: 'Build mobile tabs', fr: 'Onglets build mobile' })}
+              >
+                {([
+                  ['tree', t({ en: 'Tree', fr: 'Arbre' })],
+                  ['explorer', t({ en: 'Explorer', fr: 'Explorer' })],
+                  ['train', t({ en: 'Train', fr: 'Train' })],
+                  ['settings', t({ en: 'Settings', fr: 'Paramètres' })],
+                ] as const).map(([id, label]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    role="tab"
+                    aria-selected={mobileBuildTab === id}
+                    className={[
+                      'flex h-11 items-center justify-center text-[11px] font-medium transition-colors',
+                      mobileBuildTab === id
+                        ? 'text-[var(--accent)]'
+                        : 'text-[var(--text)] opacity-80',
+                    ].join(' ')}
+                    onClick={() => setMobileBuildTab(id)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </nav>
+            </div>
+          ) : mode === 'train' ? (
           <div className={['mx-auto w-full', device.isMobile ? 'max-w-none px-0' : 'max-w-[420px]'].join(' ')}>
             <div className="rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-2.5 shadow-[var(--shadow)] sm:p-3">
               <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
@@ -3627,7 +3894,7 @@ export function BuildMode() {
               className={[
                 'rounded-xl border border-[var(--border)] bg-[var(--social-bg)] shadow-[var(--shadow)]',
                 device.isMobile ? 'p-2 sm:p-4' : 'p-4',
-                device.isMobile && mode === 'build' && mobileBuildTab !== 'board' ? 'hidden' : '',
+                device.isMobile && mode === 'build' && mobileBuildTab === 'settings' ? 'hidden' : '',
               ].join(' ')}
             >
               <div
@@ -3867,44 +4134,6 @@ export function BuildMode() {
               </div>
             ) : null}
 
-            {device.isMobile && mode === 'build' ? (
-              <nav
-                className="fixed bottom-0 left-0 right-0 z-[52] flex gap-1 border-t border-[var(--border)] bg-[var(--bg)]/95 px-2 pt-1.5 backdrop-blur-md pb-[calc(0.5rem+env(safe-area-inset-bottom,0px))]"
-                role="tablist"
-                aria-label="Navigation build"
-              >
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={mobileBuildTab === 'tree'}
-                  className={[
-                    'flex flex-1 flex-col items-center gap-0.5 rounded-lg py-2 text-[11px] font-medium transition-colors',
-                    mobileBuildTab === 'tree'
-                      ? 'bg-[var(--accent-bg)] text-[var(--accent)]'
-                      : 'text-[var(--text)] opacity-80 hover:bg-[var(--code-bg)]',
-                  ].join(' ')}
-                  onClick={() => setMobileBuildTab('tree')}
-                >
-                  <ListTree className="h-5 w-5" strokeWidth={2} aria-hidden />
-                  {t({ en: 'Tree', fr: 'Arbre' })}
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={mobileBuildTab === 'board'}
-                  className={[
-                    'flex flex-1 flex-col items-center gap-0.5 rounded-lg py-2 text-[11px] font-medium transition-colors',
-                    mobileBuildTab === 'board'
-                      ? 'bg-[var(--accent-bg)] text-[var(--accent)]'
-                      : 'text-[var(--text)] opacity-80 hover:bg-[var(--code-bg)]',
-                  ].join(' ')}
-                  onClick={() => setMobileBuildTab('board')}
-                >
-                  <LayoutGrid className="h-5 w-5" strokeWidth={2} aria-hidden />
-                  {t({ en: 'Board', fr: 'Échiquier' })}
-                </button>
-              </nav>
-            ) : null}
           </div>
           )}
         </>

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { SlidersHorizontal } from 'lucide-react'
+import { Power, SlidersHorizontal } from 'lucide-react'
 import { Chess } from 'chess.js'
 
 import type { EngineEval } from '../../lib/stockfishClient'
@@ -33,6 +33,7 @@ type Props = {
   /** Stockfish : évalue chaque coup suggéré (FEN après le coup). */
   stockfishActive?: boolean
   stockfishEvaluateFen?: (fen: string) => Promise<EngineEval>
+  onToggleStockfish?: () => void
 }
 
 const RATING_BUCKETS = [1600, 1800, 2000, 2200, 2500] as const
@@ -104,6 +105,7 @@ export function OpeningExplorer({
   onPlayMove,
   stockfishActive = false,
   stockfishEvaluateFen,
+  onToggleStockfish,
 }: Props) {
   const { t } = useI18n()
   const [selectedBands, setSelectedBands] = useState<Set<number>>(() => new Set(RATING_BANDS.map((_, i) => i)))
@@ -297,52 +299,69 @@ export function OpeningExplorer({
             <span className="select-none text-[10px] font-normal uppercase tracking-wide opacity-45">
               Lichess
             </span>
-            <div className="relative ml-auto shrink-0" ref={eloOptionsRef}>
-              <button
-                type="button"
-                className={[
-                  'counter inline-flex h-7 w-7 items-center justify-center !p-0',
-                  eloOptionsOpen ? 'border-[var(--accent)] bg-[var(--accent-bg)] text-[var(--accent)]' : '',
-                ].join(' ')}
-                aria-expanded={eloOptionsOpen}
-                aria-label={t({ en: 'ELO options (rating bands)', fr: 'Options ELO (tranches de classement)' })}
-                title={t({ en: 'ELO options', fr: 'Options ELO' })}
-                onClick={() => setEloOptionsOpen((v) => !v)}
-              >
-                <SlidersHorizontal className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
-              </button>
-              {eloOptionsOpen ? (
-                <div className="absolute right-0 top-full z-[70] mt-1 w-[min(calc(100vw-2rem),18rem)] rounded-md border border-neutral-200 bg-white p-3 text-left text-neutral-900 shadow-lg">
-                  <div className="text-xs font-medium">{t({ en: 'ELO (bands)', fr: 'ELO (tranches)' })}</div>
-                  <p className="mt-1 text-[10px] leading-snug text-neutral-600">
-                    {t({
-                      en: 'Click to enable/disable (at least one band).',
-                      fr: 'Clique pour activer / désactiver (au moins une tranche).',
-                    })}
-                  </p>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {RATING_BANDS.map((band, i) => {
-                      const on = selectedBands.has(i)
-                      return (
-                        <button
-                          key={band.label}
-                          type="button"
-                          className={[
-                            'rounded-md border px-2 py-1 font-mono text-xs transition-colors',
-                            on
-                              ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
-                              : 'border-neutral-200 bg-neutral-100 text-neutral-800 opacity-90 hover:opacity-100',
-                          ].join(' ')}
-                          aria-pressed={on}
-                          onClick={() => toggleBand(i)}
-                        >
-                          {band.label}
-                        </button>
-                      )
-                    })}
-                  </div>
-                </div>
+            <div className="ml-auto flex items-center gap-1">
+              {onToggleStockfish ? (
+                <button
+                  type="button"
+                  className={[
+                    'counter inline-flex h-7 w-7 items-center justify-center !p-0',
+                    stockfishActive ? 'border-[var(--accent)] bg-[var(--accent-bg)] text-[var(--accent)]' : '',
+                  ].join(' ')}
+                  aria-pressed={stockfishActive}
+                  aria-label={t({ en: 'Stockfish on/off', fr: 'Stockfish on/off' })}
+                  title={t({ en: 'Stockfish on/off', fr: 'Stockfish on/off' })}
+                  onClick={onToggleStockfish}
+                >
+                  <Power className="h-3.5 w-3.5" aria-hidden />
+                </button>
               ) : null}
+              <div className="relative shrink-0" ref={eloOptionsRef}>
+                <button
+                  type="button"
+                  className={[
+                    'counter inline-flex h-7 w-7 items-center justify-center !p-0',
+                    eloOptionsOpen ? 'border-[var(--accent)] bg-[var(--accent-bg)] text-[var(--accent)]' : '',
+                  ].join(' ')}
+                  aria-expanded={eloOptionsOpen}
+                  aria-label={t({ en: 'ELO options (rating bands)', fr: 'Options ELO (tranches de classement)' })}
+                  title={t({ en: 'ELO options', fr: 'Options ELO' })}
+                  onClick={() => setEloOptionsOpen((v) => !v)}
+                >
+                  <SlidersHorizontal className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
+                </button>
+                {eloOptionsOpen ? (
+                  <div className="absolute right-0 top-full z-[70] mt-1 w-[min(calc(100vw-2rem),18rem)] rounded-md border border-neutral-200 bg-white p-3 text-left text-neutral-900 shadow-lg">
+                    <div className="text-xs font-medium">{t({ en: 'ELO (bands)', fr: 'ELO (tranches)' })}</div>
+                    <p className="mt-1 text-[10px] leading-snug text-neutral-600">
+                      {t({
+                        en: 'Click to enable/disable (at least one band).',
+                        fr: 'Clique pour activer / désactiver (au moins une tranche).',
+                      })}
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {RATING_BANDS.map((band, i) => {
+                        const on = selectedBands.has(i)
+                        return (
+                          <button
+                            key={band.label}
+                            type="button"
+                            className={[
+                              'rounded-md border px-2 py-1 font-mono text-xs transition-colors',
+                              on
+                                ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
+                                : 'border-neutral-200 bg-neutral-100 text-neutral-800 opacity-90 hover:opacity-100',
+                            ].join(' ')}
+                            aria-pressed={on}
+                            onClick={() => toggleBand(i)}
+                          >
+                            {band.label}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
             </div>
           </div>
           <div className="mt-1 truncate text-xs opacity-80">
