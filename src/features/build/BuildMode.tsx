@@ -2255,13 +2255,18 @@ export function BuildMode() {
   return (
     <div
       className={[
-        'flex flex-1 flex-col gap-6 py-8',
+        'flex flex-1 flex-col gap-6',
+        device.isMobile && mode === 'train' ? 'py-0' : 'py-8',
         device.isMobile
           ? mode === 'build'
             ? 'px-2 sm:px-4 web-shell'
-            : 'px-2 sm:px-4'
+            : mode === 'train'
+              ? 'px-0 web-shell'
+              : 'px-2 sm:px-4'
           : 'web-shell pl-[224px] pr-[30px] pt-[82px]',
-        !device.isMobile || (device.isMobile && mode === 'build') ? `web-theme-${visualTheme}` : '',
+        !device.isMobile || (device.isMobile && (mode === 'build' || mode === 'train'))
+          ? `web-theme-${visualTheme}`
+          : '',
       ].join(' ')}
     >
       {!device.isMobile ? (
@@ -3090,11 +3095,6 @@ export function BuildMode() {
         )
       ) : (
         <>
-          {device.isMobile && mode !== 'build' ? (
-            <div className="mx-auto flex w-full max-w-[1126px] justify-end">
-              <UserProfileChrome placement="inline" />
-            </div>
-          ) : null}
           {device.isMobile && mode === 'build' ? (
             <div className="mx-auto flex h-[calc(100svh-6rem)] w-full max-w-none flex-col">
               <section className="shrink-0 rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-3 shadow-[var(--shadow)]">
@@ -3360,7 +3360,7 @@ export function BuildMode() {
               </nav>
             </div>
           ) : mode === 'train' ? (
-            <div className={['mx-auto w-full', device.isMobile ? 'max-w-none px-0' : 'max-w-[980px]'].join(' ')}>
+            <div className={['w-full', device.isMobile ? 'max-w-none px-0' : 'mx-auto max-w-[980px]'].join(' ')}>
               <div className="rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-3 shadow-[var(--shadow)] sm:p-4">
                 <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                   <div className="min-w-0">
@@ -3484,24 +3484,26 @@ export function BuildMode() {
                       >
                         {t({ en: 'Suspend', fr: 'Suspendre' })}
                       </button>
-                      <div className="ml-auto flex items-center gap-2">
-                        <button
-                          type="button"
-                          className={[
-                            'toggle-switch toggle-switch--sm',
-                            showBoardAnnotations ? 'is-on' : '',
-                          ].join(' ')}
-                          role="switch"
-                          aria-checked={showBoardAnnotations}
-                          aria-label={t({ en: 'Show board annotations', fr: "Afficher les annotations sur l'échiquier" })}
-                          onClick={() => setShowBoardAnnotations((v) => !v)}
-                        >
-                          <span className="toggle-thumb" />
-                        </button>
-                        <span className="text-[11px] uppercase tracking-wide opacity-60">
-                          {t({ en: 'Annotations', fr: 'Annotations' })}
-                        </span>
-                      </div>
+                      {!device.isMobile ? (
+                        <div className="ml-auto flex items-center gap-2">
+                          <button
+                            type="button"
+                            className={[
+                              'toggle-switch toggle-switch--sm',
+                              showBoardAnnotations ? 'is-on' : '',
+                            ].join(' ')}
+                            role="switch"
+                            aria-checked={showBoardAnnotations}
+                            aria-label={t({ en: 'Show board annotations', fr: "Afficher les annotations sur l'échiquier" })}
+                            onClick={() => setShowBoardAnnotations((v) => !v)}
+                          >
+                            <span className="toggle-thumb" />
+                          </button>
+                          <span className="text-[11px] uppercase tracking-wide opacity-60">
+                            {t({ en: 'Annotations', fr: 'Annotations' })}
+                          </span>
+                        </div>
+                      ) : null}
                     </div>
                   </div>
 
@@ -4477,6 +4479,17 @@ export function BuildMode() {
                 }}
               >
                 New run
+              </button>
+              <button
+                type="button"
+                className="counter"
+                onClick={() => {
+                  setModal(null)
+                  setMode('build')
+                  setView('session')
+                }}
+              >
+                {t({ en: 'Back to build mode', fr: 'Retour au mode build' })}
               </button>
             </div>
           }
