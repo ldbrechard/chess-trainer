@@ -5,9 +5,11 @@ import {
   Check,
   ChevronLeft,
   Circle,
+  Compass,
   Download,
   Eye,
   Flame,
+  GitBranch,
   Pencil,
   Power,
   Settings,
@@ -108,6 +110,10 @@ const ANNOTATION_BRUSH_CYCLE = ['green', 'red', 'blue'] as const satisfies reado
 const EMPTY_DESTS = new Map<Key, Key[]>()
 const STOCKFISH_VERSION_LABEL = 'Stockfish 16.1'
 
+/** Rose–violet callout for in-progress / paused training (web Home + Build). */
+const TRAIN_IN_PROGRESS_CALLOUT_CLASS =
+  'rounded-md border border-fuchsia-400/45 bg-gradient-to-br from-rose-50 via-fuchsia-50 to-violet-100 px-3 py-3 text-left text-sm text-[var(--text-h)] shadow-sm dark:border-fuchsia-500/30 dark:from-rose-950/35 dark:via-fuchsia-950/25 dark:to-violet-950/40'
+
 function sideToTurn(side: Side): 'w' | 'b' {
   return side === 'white' ? 'w' : 'b'
 }
@@ -131,17 +137,14 @@ type PlaybackSettings = {
   replayMoves: boolean
   soundOn: boolean
 }
-type VisualTheme = 'high_contrast' | 'soft_pro'
 
 const PLAYBACK_SETTINGS_STORAGE_KEY = 'chess-trainer:playback-settings:v1'
-const VISUAL_THEME_STORAGE_KEY = 'chess-trainer:visual-theme:v1'
 const LAST_OPENED_REPERTOIRE_STORAGE_KEY = 'chess-trainer:last-opened-repertoire:v1'
 const DEFAULT_PLAYBACK_SETTINGS: PlaybackSettings = {
   animationSpeed: 'fast',
   replayMoves: true,
   soundOn: false,
 }
-const DEFAULT_VISUAL_THEME: VisualTheme = 'soft_pro'
 
 const SPEED_DELAY_MS: Record<AnimationSpeed, { replayStart: number; replayStep: number; autoReply: number; nextLine: number }> = {
   very_fast: { replayStart: 80, replayStep: 120, autoReply: 120, nextLine: 500 },
@@ -176,24 +179,6 @@ function readPlaybackSettings(): PlaybackSettings {
 function persistPlaybackSettings(s: PlaybackSettings) {
   try {
     window.localStorage.setItem(PLAYBACK_SETTINGS_STORAGE_KEY, JSON.stringify(s))
-  } catch {
-    // ignore storage errors
-  }
-}
-
-function readVisualTheme(): VisualTheme {
-  try {
-    const raw = window.localStorage.getItem(VISUAL_THEME_STORAGE_KEY)
-    if (raw === 'high_contrast' || raw === 'soft_pro') return raw
-    return DEFAULT_VISUAL_THEME
-  } catch {
-    return DEFAULT_VISUAL_THEME
-  }
-}
-
-function persistVisualTheme(theme: VisualTheme) {
-  try {
-    window.localStorage.setItem(VISUAL_THEME_STORAGE_KEY, theme)
   } catch {
     // ignore storage errors
   }
@@ -343,6 +328,16 @@ function formatLastTrainLabel(dayKey: string | undefined, t: ReturnType<typeof u
   return t({ en: '{count} days ago', fr: 'Il y a {count} jours' }, { count: daysAgo })
 }
 
+/** Most recent `lastTrainDayKey` first; repertoires without a train date sort last. */
+function compareRepertoiresByLastTrainDesc(a: Repertoire, b: Repertoire): number {
+  const ak = a.lastTrainDayKey ?? ''
+  const bk = b.lastTrainDayKey ?? ''
+  if (!ak && !bk) return 0
+  if (!ak) return 1
+  if (!bk) return -1
+  return bk.localeCompare(ak)
+}
+
 function pvUciToSanLine(fen: string, pvUci: string[] | undefined): string {
   if (!pvUci || pvUci.length === 0) return '—'
   const c = new Chess()
@@ -378,11 +373,15 @@ function lineToPgnMoves(moves: Move[]): string {
 }
 
 type MobileBuildTab = 'tree' | 'explorer' | 'train' | 'settings'
+type MobileHomeSideTab = 'white' | 'black' | 'all'
 
 export function BuildMode() {
   const { t } = useI18n()
   const device = useDevice()
   const [mobileBuildTab, setMobileBuildTab] = useState<MobileBuildTab>('tree')
+  const [mobileHomeSideTab, setMobileHomeSideTab] = useState<MobileHomeSideTab>('all')
+  const [homeHelpOpen, setHomeHelpOpen] = useState(false)
+  const [homeAddRepertoireOpen, setHomeAddRepertoireOpen] = useState(false)
   const [view, setView] = useState<View>('home')
   const [importOpen, setImportOpen] = useState(false)
   const [createRepertoireOpen, setCreateRepertoireOpen] = useState(false)
@@ -414,7 +413,6 @@ export function BuildMode() {
   const [, setRevealed] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [playbackSettings, setPlaybackSettings] = useState<PlaybackSettings>(() => readPlaybackSettings())
-  const [visualTheme, setVisualTheme] = useState<VisualTheme>(() => readVisualTheme())
   const notificationsSupported = typeof window !== 'undefined' && 'Notification' in window
   const [flipBoard, setFlipBoard] = useState(false)
   const [showDests, setShowDests] = useState(true)
@@ -631,6 +629,12 @@ export function BuildMode() {
   const isAnnotating = mode === 'build' && annotationTool !== 'none'
   const whiteRepertoires = useMemo(() => repertoires.filter((r) => r.side === 'white'), [repertoires])
   const blackRepertoires = useMemo(() => repertoires.filter((r) => r.side === 'black'), [repertoires])
+  const mobileHomeRepertoireList = useMemo(() => {
+    const sorted = [...repertoires].sort(compareRepertoiresByLastTrainDesc)
+    if (mobileHomeSideTab === 'white') return sorted.filter((r) => r.side === 'white')
+    if (mobileHomeSideTab === 'black') return sorted.filter((r) => r.side === 'black')
+    return sorted
+  }, [repertoires, mobileHomeSideTab])
   const currentFocusRepertoire = useMemo(() => {
     if (repertoires.length === 0) return null
     const byLast = repertoires.find((r) => r.id === lastOpenedRepertoireId)
@@ -645,14 +649,16 @@ export function BuildMode() {
   }, [playbackSettings])
 
   useEffect(() => {
-    persistVisualTheme(visualTheme)
-  }, [visualTheme])
-
-  useEffect(() => {
     if (!activeRepertoireId) return
     setLastOpenedRepertoireId(activeRepertoireId)
     persistLastOpenedRepertoireId(activeRepertoireId)
   }, [activeRepertoireId])
+
+  useEffect(() => {
+    if (view === 'home') return
+    setHomeHelpOpen(false)
+    setHomeAddRepertoireOpen(false)
+  }, [view])
 
   const toggleRepertoireNotifications = useCallback(() => {
     if (!activeRepertoireId) return
@@ -2255,18 +2261,17 @@ export function BuildMode() {
   return (
     <div
       className={[
-        'flex flex-1 flex-col gap-6',
-        device.isMobile && mode === 'train' ? 'py-0' : 'py-8',
+        'flex flex-1 flex-col',
+        device.isMobile && view === 'home' ? 'gap-0 py-0' : device.isMobile && mode === 'train' ? 'gap-0 py-0' : 'gap-6 py-8',
         device.isMobile
           ? mode === 'build'
             ? 'px-2 sm:px-4 web-shell'
             : mode === 'train'
               ? 'px-0 web-shell'
-              : 'px-2 sm:px-4'
+              : view === 'home'
+                ? 'px-0 web-shell'
+                : 'px-2 sm:px-4'
           : 'web-shell pl-[224px] pr-[30px] pt-[82px]',
-        !device.isMobile || (device.isMobile && (mode === 'build' || mode === 'train'))
-          ? `web-theme-${visualTheme}`
-          : '',
       ].join(' ')}
     >
       {!device.isMobile ? (
@@ -2857,10 +2862,306 @@ export function BuildMode() {
               </div>
             </section>
           </div>
+        ) : device.isMobile ? (
+          <div className="flex min-h-[100svh] flex-1 flex-col overflow-x-hidden bg-[var(--bg)] text-left">
+            <header className="sticky top-0 z-[65] flex items-center justify-between gap-2 border-b border-[var(--border)] bg-[var(--bg)] px-3 py-2 pt-[max(0.5rem,env(safe-area-inset-top,0px))]">
+              <span className="min-w-0 truncate text-base font-bold tracking-tight text-[var(--text-h)]">Opening Grinder</span>
+              <div className="flex shrink-0 items-center gap-1">
+                <UserProfileChrome placement="inline" />
+                <button
+                  type="button"
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--social-bg)] text-sm font-bold text-[var(--text-h)] transition-colors hover:bg-[var(--code-bg)] active:scale-95"
+                  onClick={() => setHomeHelpOpen(true)}
+                  aria-label={t({ en: 'About the app', fr: "À propos de l'application" })}
+                >
+                  ?
+                </button>
+              </div>
+            </header>
+            <div className="mt-2 web-dashboard-card w-full rounded-none border-x-0 border-t-0 bg-[#edf2f8] px-3 py-3 sm:rounded-xl sm:border-x sm:border-t">
+              <div className="text-xs font-medium uppercase tracking-wide opacity-65">{t({ en: 'Current focus', fr: 'Focus actuel' })}</div>
+              <div className="mt-1 text-[22px] font-bold tracking-tight text-[var(--text-h)]">{currentFocusRepertoire?.title ?? '—'}</div>
+              {currentFocusRepertoire?.description ? (
+                <div className="mt-1 text-xs italic text-[var(--text)] opacity-75">{currentFocusRepertoire.description}</div>
+              ) : null}
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="text-center">
+                    <div className="text-xl font-bold text-[var(--text-h)]">
+                      {currentFocusRepertoire ? `${repertoireMastery[currentFocusRepertoire.id] ?? 0}%` : '0%'}
+                    </div>
+                    <div className="text-[10px] font-semibold uppercase tracking-wider opacity-65">Mastery</div>
+                  </div>
+                  <div className="p-1">
+                    <RepertoirePreviewBoard
+                      fen={currentFocusRepertoire ? repertoireMainLineFens[currentFocusRepertoire.id] ?? new Chess().fen() : new Chess().fen()}
+                      orientation={currentFocusRepertoire?.side ?? 'white'}
+                      sizeClassName="h-[64px] w-[64px]"
+                    />
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    className="rounded-full bg-[var(--primary)] px-4 py-1.5 text-xs font-semibold text-white"
+                    onClick={() => {
+                      if (!currentFocusRepertoire) return
+                      setActiveRepertoireId(currentFocusRepertoire.id)
+                      setMode('build')
+                      setView('session')
+                      window.setTimeout(() => {
+                        setModal({
+                          kind: 'trainStart',
+                          fullCount: trainPositions.length,
+                          selectionCount: selectionTrainPositions.length,
+                          hasSelection: currentNodeId != null,
+                        })
+                      }, 0)
+                    }}
+                  >
+                    {t({ en: 'Train Now', fr: 'Train' })}
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-full bg-[#dfe5ec] px-4 py-1.5 text-xs font-semibold text-[var(--text-h)]"
+                    onClick={() => {
+                      if (!currentFocusRepertoire) return
+                      setActiveRepertoireId(currentFocusRepertoire.id)
+                      setMode('build')
+                      setView('session')
+                      window.setTimeout(() => {
+                        setModal({
+                          kind: 'puzzleStart',
+                          hasSelection: currentNodeId != null,
+                        })
+                      }, 0)
+                    }}
+                  >
+                    {t({ en: 'Puzzles', fr: 'Puzzles' })}
+                  </button>
+                </div>
+              </div>
+            </div>
+            {currentFocusRepertoire &&
+            activeRepertoireId === currentFocusRepertoire.id &&
+            (trainRunSuspended || (mode === 'train' && trainRunActive)) ? (
+              <div className={`mx-3 mt-3 ${TRAIN_IN_PROGRESS_CALLOUT_CLASS}`}>
+                {trainRunSuspended ? (
+                  <>
+                    <div className="text-xs font-medium opacity-80">{t({ en: 'Training paused', fr: 'Entraînement en pause' })}</div>
+                    <div className="mt-2 text-xs opacity-75">
+                      {t(
+                        {
+                          en: 'Passed: {passed}/{total} · Remaining: {remaining} · Fails: {failed}',
+                          fr: 'Réussies: {passed}/{total} · Restantes: {remaining} · Échecs: {failed}',
+                        },
+                        { passed: trainPassed, total: trainTotal, remaining: trainRemaining, failed: trainFailed },
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      className="counter mt-3 w-full"
+                      disabled={busy || replayingSequence}
+                      onClick={() => {
+                        setView('session')
+                        void resumeTrainRun()
+                      }}
+                    >
+                      {t({ en: 'Resume training', fr: "Reprendre l'entraînement" })}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <div className="text-xs font-medium opacity-80">
+                      {t({ en: 'Training in progress', fr: 'Entraînement en cours' })}
+                    </div>
+                    <div className="mt-2 text-xs opacity-75">
+                      {t(
+                        {
+                          en: 'Passed: {passed}/{total} · Remaining: {remaining} · Fails: {failed}',
+                          fr: 'Réussies: {passed}/{total} · Restantes: {remaining} · Échecs: {failed}',
+                        },
+                        { passed: trainPassed, total: trainTotal, remaining: trainRemaining, failed: trainFailed },
+                      )}
+                    </div>
+                    <button type="button" className="counter mt-3 w-full" onClick={() => setView('session')}>
+                      {t({ en: 'Continue', fr: 'Continuer' })}
+                    </button>
+                  </>
+                )}
+              </div>
+            ) : null}
+            <div className="flex-1 overflow-y-auto px-3 pb-[calc(4.25rem+env(safe-area-inset-bottom,0px))] pt-4">
+              <section className="space-y-4">
+                <div className="flex items-center justify-between gap-2">
+                  <h2 className="m-0 min-w-0 flex-1 text-2xl font-bold tracking-tight text-[var(--text-h)] sm:text-4xl">
+                    {t({ en: 'Active Repertoires', fr: 'Répertoires actifs' })}
+                  </h2>
+                  <button
+                    type="button"
+                    className="counter mb-0 shrink-0 whitespace-nowrap rounded-full bg-[var(--primary)] px-3 py-1.5 text-xs font-semibold text-white"
+                    onClick={() => setHomeAddRepertoireOpen(true)}
+                  >
+                    {t({ en: 'Add a repertoire', fr: 'Ajouter un répertoire' })}
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+                  {mobileHomeRepertoireList.map((rep) => (
+                  <div
+                    key={rep.id}
+                    className="web-dashboard-card rounded-[22px] bg-[var(--social-bg)] text-left"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => {
+                      setActiveRepertoireId(rep.id)
+                      setMode('build')
+                      setView('session')
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key !== 'Enter' && e.key !== ' ') return
+                      e.preventDefault()
+                      setActiveRepertoireId(rep.id)
+                      setMode('build')
+                      setView('session')
+                    }}
+                  >
+                    <div className="mb-4 flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <div className="min-w-0 whitespace-normal text-[24px] font-bold leading-tight tracking-tight break-words text-[var(--text-h)]">
+                            {rep.title}
+                          </div>
+                          <span
+                            className={[
+                              'inline-flex rounded-md px-2 py-1 text-[11px] font-semibold leading-none',
+                              rep.side === 'white' ? 'border border-neutral-300 bg-white text-black' : 'bg-black text-white',
+                            ].join(' ')}
+                          >
+                            {rep.side === 'white' ? t({ en: 'White', fr: 'Blanc' }) : t({ en: 'Black', fr: 'Noir' })}
+                          </span>
+                        </div>
+                        {rep.description ? (
+                          <div className="mt-0.5 text-[11px] italic break-words text-[var(--text)] opacity-75">{rep.description}</div>
+                        ) : null}
+                      </div>
+                      <div className="rounded-xl bg-[#f2f4f8] px-3 py-1.5 text-sm font-bold text-[var(--primary)]">
+                        {repertoireMastery[rep.id] ?? 0}%
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-[12px]">
+                      <div className="p-1">
+                        <RepertoirePreviewBoard
+                          fen={repertoireMainLineFens[rep.id] ?? new Chess().fen()}
+                          orientation={rep.side}
+                          sizeClassName="h-[74px] w-[74px]"
+                        />
+                      </div>
+                      <div className="space-y-1 px-1 py-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <span>{t({ en: 'Max depth', fr: 'Profondeur max' })}</span>
+                          <strong>{repertoireMaxDepth[rep.id] ?? 0}</strong>
+                        </div>
+                        <div className="flex items-center justify-between gap-2">
+                          <span>{t({ en: 'Positions', fr: 'Positions' })}</span>
+                          <strong>{repertoireCounts[rep.id] ?? 0}</strong>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mt-4 flex items-center justify-between border-t border-[var(--border)] pt-3 text-[11px]">
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          className="inline-flex h-7 w-7 items-center justify-center rounded text-[var(--text)] opacity-70 hover:bg-[var(--accent-bg)] hover:text-[var(--accent)] hover:opacity-100"
+                          title={t({ en: 'Rename', fr: 'Renommer' })}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setRenameTarget(rep)
+                          }}
+                        >
+                          <Pencil className="h-3.5 w-3.5" aria-hidden />
+                        </button>
+                        <button
+                          type="button"
+                          className="inline-flex h-7 w-7 items-center justify-center rounded text-[var(--text)] opacity-70 hover:bg-red-500/15 hover:text-red-600 hover:opacity-100 dark:hover:text-red-400"
+                          title={t({ en: 'Delete repertoire', fr: 'Supprimer le répertoire' })}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setModal({ kind: 'confirmDeleteRepertoire', repertoire: rep })
+                          }}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" aria-hidden />
+                        </button>
+                        <button
+                          type="button"
+                          className="inline-flex h-7 w-7 items-center justify-center rounded text-[var(--text)] opacity-70 hover:bg-[var(--accent-bg)] hover:text-[var(--accent)] hover:opacity-100"
+                          title={t({ en: 'Download PGN', fr: 'Télécharger PGN' })}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            void handleExportPgn(rep.id)
+                          }}
+                        >
+                          <Download className="h-3.5 w-3.5" aria-hidden />
+                        </button>
+                        <button
+                          type="button"
+                          className="inline-flex h-7 w-7 items-center justify-center rounded text-[var(--text)] opacity-70 hover:bg-[var(--accent-bg)] hover:text-[var(--accent)] hover:opacity-100"
+                          title={t({ en: 'Share', fr: 'Partager' })}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setShareTarget({ id: rep.id, title: rep.title })
+                          }}
+                        >
+                          <Share2 className="h-3.5 w-3.5" aria-hidden />
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="opacity-70">
+                          {t({ en: 'Last train:', fr: 'Dernier entraînement :' })} {formatLastTrainLabel(rep.lastTrainDayKey, t)}
+                        </span>
+                        <span className="rounded-lg bg-[#ffe7dc] px-2 py-1 font-semibold text-[#8d3c1a]">
+                          {t({ en: '{count} due', fr: '{count} à revoir' }, { count: repertoireDueCounts[rep.id] ?? 0 })}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+            </div>
+            <nav
+              className="fixed bottom-0 left-0 right-0 z-[70] grid grid-cols-3 border-t border-[var(--border)] bg-[var(--bg)] pb-[env(safe-area-inset-bottom,0px)]"
+              role="tablist"
+              aria-label={t({ en: 'Filter repertoires by color', fr: 'Filtrer les répertoires par couleur' })}
+            >
+              {(
+                [
+                  ['white', t({ en: 'Whites', fr: 'Blancs' })],
+                  ['black', t({ en: 'Blacks', fr: 'Noirs' })],
+                  ['all', t({ en: 'All', fr: 'Tous' })],
+                ] as const
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  role="tab"
+                  aria-selected={mobileHomeSideTab === id}
+                  className={[
+                    'flex h-12 items-center justify-center border-t-2 border-transparent text-xs font-semibold transition-colors',
+                    mobileHomeSideTab === id
+                      ? 'border-[var(--accent)] bg-[var(--accent-bg)] text-[var(--accent)]'
+                      : 'text-[var(--text)] opacity-80',
+                  ].join(' ')}
+                  onClick={() => setMobileHomeSideTab(id)}
+                >
+                  {label}
+                </button>
+              ))}
+            </nav>
+          </div>
         ) : (
           <div className="w-full text-left">
             <section className="space-y-4">
-              <div className="flex items-start gap-3">
+              <div className="flex flex-wrap items-start gap-3">
                 <div className="web-dashboard-card w-fit max-w-[980px] rounded-[22px] bg-[#edf2f8] pb-2">
                   <div className="mb-1.5 flex flex-wrap items-center justify-between gap-3">
                     <div className="flex items-center gap-3">
@@ -2932,6 +3233,55 @@ export function BuildMode() {
                     </div>
                   </div>
                 </div>
+                {currentFocusRepertoire &&
+                activeRepertoireId === currentFocusRepertoire.id &&
+                (trainRunSuspended || (mode === 'train' && trainRunActive)) ? (
+                  <div className={`min-w-[14rem] max-w-xs shrink-0 ${TRAIN_IN_PROGRESS_CALLOUT_CLASS}`}>
+                    {trainRunSuspended ? (
+                      <>
+                        <div className="text-xs font-medium opacity-80">{t({ en: 'Training paused', fr: 'Entraînement en pause' })}</div>
+                        <div className="mt-2 text-xs opacity-75">
+                          {t(
+                            {
+                              en: 'Passed: {passed}/{total} · Remaining: {remaining} · Fails: {failed}',
+                              fr: 'Réussies: {passed}/{total} · Restantes: {remaining} · Échecs: {failed}',
+                            },
+                            { passed: trainPassed, total: trainTotal, remaining: trainRemaining, failed: trainFailed },
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          className="counter mt-3"
+                          disabled={busy || replayingSequence}
+                          onClick={() => {
+                            setView('session')
+                            void resumeTrainRun()
+                          }}
+                        >
+                          {t({ en: 'Resume training', fr: "Reprendre l'entraînement" })}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <div className="text-xs font-medium opacity-80">
+                          {t({ en: 'Training in progress', fr: 'Entraînement en cours' })}
+                        </div>
+                        <div className="mt-2 text-xs opacity-75">
+                          {t(
+                            {
+                              en: 'Passed: {passed}/{total} · Remaining: {remaining} · Fails: {failed}',
+                              fr: 'Réussies: {passed}/{total} · Restantes: {remaining} · Échecs: {failed}',
+                            },
+                            { passed: trainPassed, total: trainTotal, remaining: trainRemaining, failed: trainFailed },
+                          )}
+                        </div>
+                        <button type="button" className="counter mt-3" onClick={() => setView('session')}>
+                          {t({ en: 'Continue', fr: 'Continuer' })}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                ) : null}
                 <div className="ml-auto flex flex-nowrap items-center justify-end gap-2 self-center">
                   <button
                     type="button"
@@ -3234,7 +3584,7 @@ export function BuildMode() {
                 ) : null}
               </section>
 
-              <section className="mt-3 flex-1 overflow-y-auto pb-[calc(3.75rem+env(safe-area-inset-bottom,0px))]">
+              <section className="mt-3 flex-1 overflow-y-auto pb-[calc(8rem+env(safe-area-inset-bottom,0px))]">
                 {mobileBuildTab === 'tree' ? (
                   <MoveTreeView
                     forest={forest}
@@ -3295,37 +3645,59 @@ export function BuildMode() {
                         Puzzles
                       </button>
                     </div>
+                    {activeRepertoireId && trainRunSuspended ? (
+                      <div className={`mt-3 ${TRAIN_IN_PROGRESS_CALLOUT_CLASS}`}>
+                        <div className="text-xs font-medium opacity-80">{t({ en: 'Training paused', fr: 'Entraînement en pause' })}</div>
+                        <div className="mt-2 text-xs opacity-75">
+                          {t(
+                            {
+                              en: 'Passed: {passed}/{total} · Remaining: {remaining} · Fails: {failed}',
+                              fr: 'Passées: {passed} / {total} · Restantes: {remaining} · Échecs: {failed}',
+                            },
+                            { passed: trainPassed, total: trainTotal, remaining: trainRemaining, failed: trainFailed },
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          className="counter mt-3 w-full"
+                          disabled={busy || replayingSequence}
+                          onClick={() => {
+                            setView('session')
+                            void resumeTrainRun()
+                          }}
+                        >
+                          {t({ en: 'Resume training', fr: "Reprendre l'entraînement" })}
+                        </button>
+                      </div>
+                    ) : null}
                   </div>
                 ) : null}
 
                 {mobileBuildTab === 'settings' ? (
-                  <div className="space-y-2 rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-3 shadow-[var(--shadow)]">
+                  <div className="space-y-3 rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-3 shadow-[var(--shadow)]">
                     <div className="text-xs font-semibold uppercase tracking-wide text-[var(--text-h)] opacity-70">
                       {t({ en: 'Board settings', fr: "Paramètres de l'échiquier" })}
                     </div>
-                    <ToggleRow
-                      label={t({ en: 'Flip board', fr: "Inverser l'orientation" })}
-                      checked={flipBoard}
-                      onChange={() => setFlipBoard((v) => !v)}
+                    <SettingsPanelBody
+                      fen={currentFen}
+                      flipBoard={flipBoard}
+                      showDests={showDests}
+                      showBoardAnnotations={showBoardAnnotations}
+                      showAnnotationsToggle
+                      animationSpeed={playbackSettings.animationSpeed}
+                      replayMoves={playbackSettings.replayMoves}
+                      soundOn={playbackSettings.soundOn}
+                      notificationsEnabled={activeRepertoire?.notificationsEnabled === true}
+                      notificationsSupported={notificationsSupported}
+                      onCopyFen={() => void navigator.clipboard.writeText(currentFen)}
+                      onToggleFlip={() => setFlipBoard((v) => !v)}
+                      onToggleDests={() => setShowDests((v) => !v)}
+                      onToggleAnnotations={() => setShowBoardAnnotations((v) => !v)}
+                      onChangeAnimationSpeed={(animationSpeed) => setPlaybackSettings((prev) => ({ ...prev, animationSpeed }))}
+                      onToggleReplayMoves={() => setPlaybackSettings((prev) => ({ ...prev, replayMoves: !prev.replayMoves }))}
+                      onToggleSound={() => setPlaybackSettings((prev) => ({ ...prev, soundOn: !prev.soundOn }))}
+                      onToggleNotifications={toggleRepertoireNotifications}
                     />
-                    <ToggleRow
-                      label={t({ en: 'Show legal moves', fr: 'Montrer les coups légaux' })}
-                      checked={showDests}
-                      onChange={() => setShowDests((v) => !v)}
-                    />
-                    <ToggleRow
-                      label={t({ en: 'Visual annotations', fr: 'Annotations visuelles' })}
-                      checked={showBoardAnnotations}
-                      onChange={() => setShowBoardAnnotations((v) => !v)}
-                    />
-                    <button
-                      type="button"
-                      className="counter mb-0 mt-2 inline-flex items-center gap-2 text-xs"
-                      onClick={() => setSettingsOpen(true)}
-                    >
-                      <Settings className="h-3.5 w-3.5" aria-hidden />
-                      {t({ en: 'More settings', fr: 'Plus de paramètres' })}
-                    </button>
                   </div>
                 ) : null}
               </section>
@@ -3335,26 +3707,29 @@ export function BuildMode() {
                 role="tablist"
                 aria-label={t({ en: 'Build mobile tabs', fr: 'Onglets build mobile' })}
               >
-                {([
-                  ['tree', t({ en: 'Tree', fr: 'Arbre' })],
-                  ['explorer', t({ en: 'Explorer', fr: 'Explorer' })],
-                  ['train', t({ en: 'Train', fr: 'Train' })],
-                  ['settings', t({ en: 'Settings', fr: 'Paramètres' })],
-                ] as const).map(([id, label]) => (
+                {(
+                  [
+                    ['tree', t({ en: 'Tree', fr: 'Arbre' }), GitBranch] as const,
+                    ['explorer', t({ en: 'Explorer', fr: 'Explorer' }), Compass] as const,
+                    ['train', t({ en: 'Train', fr: 'Train' }), Flame] as const,
+                    ['settings', t({ en: 'Settings', fr: 'Paramètres' }), Settings] as const,
+                  ] as const
+                ).map(([id, label, Icon]) => (
                   <button
                     key={id}
                     type="button"
                     role="tab"
                     aria-selected={mobileBuildTab === id}
                     className={[
-                      'flex h-11 items-center justify-center text-[11px] font-medium transition-colors',
+                      'flex h-[6.5rem] flex-col items-center justify-center gap-1 text-[11px] font-medium leading-tight transition-colors',
                       mobileBuildTab === id
                         ? 'text-[var(--accent)]'
                         : 'text-[var(--text)] opacity-80',
                     ].join(' ')}
                     onClick={() => setMobileBuildTab(id)}
                   >
-                    {label}
+                    <Icon className="h-5 w-5 shrink-0 opacity-90" strokeWidth={2} aria-hidden />
+                    <span>{label}</span>
                   </button>
                 ))}
               </nav>
@@ -3569,7 +3944,7 @@ export function BuildMode() {
                 </div>
 
                 {trainRunSuspended ? (
-                  <div className="mt-3 rounded-md border border-[var(--border)] bg-[var(--accent-bg)] px-3 py-3 text-left text-sm text-[var(--text-h)]">
+                  <div className={`mt-3 ${TRAIN_IN_PROGRESS_CALLOUT_CLASS}`}>
                     <div className="text-xs font-medium opacity-80">{t({ en: 'Training paused', fr: 'Entraînement en pause' })}</div>
                     <div className="mt-2 text-xs opacity-75">
                       {t(
@@ -3766,7 +4141,7 @@ export function BuildMode() {
             className={[
               'w-full gap-4',
               device.isMobile && mode === 'build'
-                ? 'flex flex-col pb-[calc(4.25rem+env(safe-area-inset-bottom,0px))]'
+                ? 'flex flex-col pb-[calc(8rem+env(safe-area-inset-bottom,0px))]'
                 : !device.isMobile && mode === 'build'
                   ? 'grid grid-cols-[30%_50%_20%] pr-[30px]'
                   : 'grid grid-cols-1 lg:grid-cols-[340px_1fr]',
@@ -3838,7 +4213,7 @@ export function BuildMode() {
               </div>
 
               {trainRunSuspended ? (
-                <div className="mt-4 rounded-md border border-[var(--border)] bg-[var(--accent-bg)] px-3 py-3 text-left text-sm text-[var(--text-h)]">
+                <div className={`mt-4 ${TRAIN_IN_PROGRESS_CALLOUT_CLASS}`}>
                   <div className="text-xs font-medium opacity-80">{t({ en: 'Training paused', fr: 'Entraînement en pause' })}</div>
                   <div className="mt-2 text-xs opacity-75">
                     {t(
@@ -4024,7 +4399,7 @@ export function BuildMode() {
                   </div>
                 </div>
                 <div className="flex items-stretch gap-3">
-                  {!device.isMobile && mode === 'build' ? (
+                  {!device.isMobile && mode === 'build' && engineBuildOn ? (
                     <div className="w-[10px] shrink-0">
                       <EvalBar eval={positionEval} bottomColor={boardOrientation} className="h-full min-h-0 w-full" />
                     </div>
@@ -4687,7 +5062,6 @@ export function BuildMode() {
           soundOn={playbackSettings.soundOn}
           notificationsEnabled={activeRepertoire?.notificationsEnabled === true}
           notificationsSupported={notificationsSupported}
-          visualTheme={visualTheme}
           onClose={() => setSettingsOpen(false)}
           onCopyFen={() => void navigator.clipboard.writeText(currentFen)}
           onToggleFlip={() => setFlipBoard((v) => !v)}
@@ -4697,8 +5071,77 @@ export function BuildMode() {
           onToggleReplayMoves={() => setPlaybackSettings((prev) => ({ ...prev, replayMoves: !prev.replayMoves }))}
           onToggleSound={() => setPlaybackSettings((prev) => ({ ...prev, soundOn: !prev.soundOn }))}
           onToggleNotifications={toggleRepertoireNotifications}
-          onChangeVisualTheme={(nextTheme) => setVisualTheme(nextTheme)}
         />
+      ) : null}
+
+      {homeHelpOpen ? (
+        <ModalFrame
+          title={t({ en: 'About Opening Grinder', fr: 'À propos d’Opening Grinder' })}
+          onClose={() => setHomeHelpOpen(false)}
+          actions={
+            <button type="button" className="counter" onClick={() => setHomeHelpOpen(false)}>
+              {t({ en: 'Close', fr: 'Fermer' })}
+            </button>
+          }
+        >
+          <p className="text-sm leading-relaxed text-[var(--text)]">
+            {t({
+              en: 'Opening Grinder helps you build chess opening repertoires, train positions with spaced repetition, and practice puzzles. Your data is stored locally on this device; sign in from the profile menu to sync across devices when cloud is configured.',
+              fr: 'Opening Grinder t’aide à construire des répertoires d’ouvertures, à t’entraîner sur les positions (répétition espacée) et à pratiquer des puzzles. Tes données sont stockées localement sur cet appareil ; connecte-toi via le menu profil pour synchroniser entre appareils lorsque le cloud est configuré.',
+            })}
+          </p>
+        </ModalFrame>
+      ) : null}
+
+      {homeAddRepertoireOpen ? (
+        <ModalFrame
+          title={t({ en: 'Add a repertoire', fr: 'Ajouter un répertoire' })}
+          onClose={() => setHomeAddRepertoireOpen(false)}
+          actions={
+            <button type="button" className="counter" onClick={() => setHomeAddRepertoireOpen(false)}>
+              {t({ en: 'Cancel', fr: 'Annuler' })}
+            </button>
+          }
+        >
+          <div className="flex flex-col gap-2 text-sm">
+            <button
+              type="button"
+              className="counter w-full py-2 text-left"
+              onClick={() => {
+                setHomeAddRepertoireOpen(false)
+                setCreateRepertoireOpen(true)
+              }}
+            >
+              {t({ en: 'Create repertoire', fr: 'Créer un répertoire' })}
+            </button>
+            <button
+              type="button"
+              className="counter w-full py-2 text-left"
+              onClick={() => {
+                setHomeAddRepertoireOpen(false)
+                setImportOpen(true)
+              }}
+            >
+              {t({ en: 'Import repertoire', fr: 'Importer un répertoire' })}
+            </button>
+            <button
+              type="button"
+              className="counter w-full py-2 text-left"
+              onClick={() => {
+                setHomeAddRepertoireOpen(false)
+                setToast({
+                  type: 'info',
+                  message: t({
+                    en: 'Repertoire explorer panel is coming next.',
+                    fr: 'Le panneau exploration des répertoires arrive ensuite.',
+                  }),
+                })
+              }}
+            >
+              {t({ en: 'Explore repertoires', fr: 'Explorer les répertoires' })}
+            </button>
+          </div>
+        </ModalFrame>
       ) : null}
 
       <CreateRepertoireModal
@@ -4818,29 +5261,7 @@ function PuzzleSessionTimer({ startedAtMs, averageMs }: { startedAtMs: number | 
   )
 }
 
-function SettingsPopup({
-  fen,
-  flipBoard,
-  showDests,
-  showBoardAnnotations,
-  showAnnotationsToggle,
-  animationSpeed,
-  replayMoves,
-  soundOn,
-  notificationsEnabled,
-  notificationsSupported,
-  visualTheme,
-  onClose,
-  onCopyFen,
-  onToggleFlip,
-  onToggleDests,
-  onToggleAnnotations,
-  onChangeAnimationSpeed,
-  onToggleReplayMoves,
-  onToggleSound,
-  onToggleNotifications,
-  onChangeVisualTheme,
-}: {
+type SettingsPanelBodyProps = {
   fen: string
   flipBoard: boolean
   showDests: boolean
@@ -4851,8 +5272,6 @@ function SettingsPopup({
   soundOn: boolean
   notificationsEnabled: boolean
   notificationsSupported: boolean
-  visualTheme: VisualTheme
-  onClose: () => void
   onCopyFen: () => void
   onToggleFlip: () => void
   onToggleDests: () => void
@@ -4861,8 +5280,105 @@ function SettingsPopup({
   onToggleReplayMoves: () => void
   onToggleSound: () => void
   onToggleNotifications: () => void
-  onChangeVisualTheme: (theme: VisualTheme) => void
-}) {
+}
+
+function SettingsPanelBody({
+  fen,
+  flipBoard,
+  showDests,
+  showBoardAnnotations,
+  showAnnotationsToggle,
+  animationSpeed,
+  replayMoves,
+  soundOn,
+  notificationsEnabled,
+  notificationsSupported,
+  onCopyFen,
+  onToggleFlip,
+  onToggleDests,
+  onToggleAnnotations,
+  onChangeAnimationSpeed,
+  onToggleReplayMoves,
+  onToggleSound,
+  onToggleNotifications,
+}: SettingsPanelBodyProps) {
+  const { t } = useI18n()
+  return (
+    <div className="space-y-4 text-left text-sm">
+      <ToggleRow label={t({ en: 'Flip board', fr: "Inverser l'échiquier" })} checked={flipBoard} onChange={onToggleFlip} />
+      <ToggleRow
+        label={t({ en: 'Show destination squares', fr: 'Afficher les cases de destination' })}
+        checked={showDests}
+        onChange={onToggleDests}
+      />
+      <div className="space-y-2">
+        <div className="text-[var(--text-h)]">{t({ en: 'Animation speed', fr: "Vitesse d'animation" })}</div>
+        <div className="flex flex-wrap gap-1.5">
+          {(
+            [
+              ['very_fast', t({ en: 'Very fast', fr: 'Très rapide' })],
+              ['fast', t({ en: 'Fast', fr: 'Rapide' })],
+              ['medium', t({ en: 'Medium', fr: 'Moyenne' })],
+              ['slow', t({ en: 'Slow', fr: 'Lente' })],
+            ] as const
+          ).map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              className={[
+                'rounded border px-2 py-1 text-xs transition-colors',
+                animationSpeed === id
+                  ? 'border-[var(--accent-border)] bg-[var(--accent-bg)] text-[var(--accent)]'
+                  : 'border-[var(--border)] bg-[var(--bg)] text-[var(--text)] hover:bg-[var(--code-bg)]',
+              ].join(' ')}
+              onClick={() => onChangeAnimationSpeed(id)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <ToggleRow label={t({ en: 'Replay moves', fr: 'Rejouer les coups' })} checked={replayMoves} onChange={onToggleReplayMoves} />
+      <ToggleRow label={t({ en: 'Sound on / off', fr: 'Son on / off' })} checked={soundOn} onChange={onToggleSound} />
+      <ToggleRow
+        label={t({ en: 'Daily reminders (FSRS + 48h)', fr: 'Rappels quotidiens (FSRS + 48h)' })}
+        checked={notificationsEnabled}
+        onChange={onToggleNotifications}
+        disabled={!notificationsSupported}
+      />
+      {!notificationsSupported ? (
+        <div className="text-xs opacity-75">
+          {t(
+            {
+              en: 'Notifications are not supported on this device/browser.',
+              fr: 'Les notifications ne sont pas supportées sur cet appareil/navigateur.',
+            },
+          )}
+        </div>
+      ) : null}
+      {showAnnotationsToggle ? (
+        <ToggleRow
+          label={t({ en: 'Show annotations', fr: 'Afficher annotations' })}
+          checked={showBoardAnnotations}
+          onChange={onToggleAnnotations}
+        />
+      ) : null}
+      <div>
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <span className="text-[var(--text-h)]">FEN</span>
+          <button type="button" className="counter text-xs" onClick={onCopyFen}>
+            {t({ en: 'Copy FEN', fr: 'Copier FEN' })}
+          </button>
+        </div>
+        <div className="break-all rounded-md bg-[var(--code-bg)] px-3 py-2 font-mono text-sm text-[var(--text-h)]">
+          {fen}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function SettingsPopup({ onClose, ...panelProps }: SettingsPanelBodyProps & { onClose: () => void }) {
   const { t } = useI18n()
   return (
     <ModalFrame
@@ -4870,98 +5386,7 @@ function SettingsPopup({
       onClose={onClose}
       actions={<button type="button" className="counter" onClick={onClose}>OK</button>}
     >
-      <div className="space-y-4 text-left text-sm">
-        <ToggleRow label={t({ en: 'Flip board', fr: "Inverser l'échiquier" })} checked={flipBoard} onChange={onToggleFlip} />
-        <ToggleRow label={t({ en: 'Show destinations', fr: 'Afficher les destinations' })} checked={showDests} onChange={onToggleDests} />
-        <div className="space-y-2">
-          <div className="text-[var(--text-h)]">{t({ en: 'Animation speed', fr: "Vitesse d'animation" })}</div>
-          <div className="flex flex-wrap gap-1.5">
-            {(
-              [
-                ['very_fast', t({ en: 'Very fast', fr: 'Très rapide' })],
-                ['fast', t({ en: 'Fast', fr: 'Rapide' })],
-                ['medium', t({ en: 'Medium', fr: 'Moyenne' })],
-                ['slow', t({ en: 'Slow', fr: 'Lente' })],
-              ] as const
-            ).map(([id, label]) => (
-              <button
-                key={id}
-                type="button"
-                className={[
-                  'rounded border px-2 py-1 text-xs transition-colors',
-                  animationSpeed === id
-                    ? 'border-[var(--accent-border)] bg-[var(--accent-bg)] text-[var(--accent)]'
-                    : 'border-[var(--border)] bg-[var(--bg)] text-[var(--text)] hover:bg-[var(--code-bg)]',
-                ].join(' ')}
-                onClick={() => onChangeAnimationSpeed(id)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="space-y-2">
-          <div className="text-[var(--text-h)]">{t({ en: 'Visual theme', fr: 'Thème visuel' })}</div>
-          <div className="flex flex-wrap gap-1.5">
-            {(
-              [
-                ['soft_pro', t({ en: 'Soft Pro (Lumina Gambit)', fr: 'Soft Pro (Lumina Gambit)' })],
-                ['high_contrast', t({ en: 'High Contrast (Analytical Monolith)', fr: 'High Contrast (Analytical Monolith)' })],
-              ] as const
-            ).map(([id, label]) => (
-              <button
-                key={id}
-                type="button"
-                className={[
-                  'rounded border px-2 py-1 text-xs transition-colors',
-                  visualTheme === id
-                    ? 'border-[var(--accent-border)] bg-[var(--accent-bg)] text-[var(--accent)]'
-                    : 'border-[var(--border)] bg-[var(--bg)] text-[var(--text)] hover:bg-[var(--code-bg)]',
-                ].join(' ')}
-                onClick={() => onChangeVisualTheme(id)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-        <ToggleRow label={t({ en: 'Replay moves', fr: 'Rejouer les coups' })} checked={replayMoves} onChange={onToggleReplayMoves} />
-        <ToggleRow label={t({ en: 'Sound on / off', fr: 'Son on / off' })} checked={soundOn} onChange={onToggleSound} />
-        <ToggleRow
-          label={t({ en: 'Daily reminders (FSRS + 48h)', fr: 'Rappels quotidiens (FSRS + 48h)' })}
-          checked={notificationsEnabled}
-          onChange={onToggleNotifications}
-          disabled={!notificationsSupported}
-        />
-        {!notificationsSupported ? (
-          <div className="text-xs opacity-75">
-            {t(
-              {
-                en: 'Notifications are not supported on this device/browser.',
-                fr: 'Les notifications ne sont pas supportées sur cet appareil/navigateur.',
-              },
-            )}
-          </div>
-        ) : null}
-        {showAnnotationsToggle ? (
-          <ToggleRow
-            label={t({ en: 'Show annotations', fr: 'Afficher annotations' })}
-            checked={showBoardAnnotations}
-            onChange={onToggleAnnotations}
-          />
-        ) : null}
-        <div>
-          <div className="mb-1 flex items-center justify-between gap-2">
-            <span className="text-[var(--text-h)]">FEN</span>
-            <button type="button" className="counter text-xs" onClick={onCopyFen}>
-              {t({ en: 'Copy FEN', fr: 'Copier FEN' })}
-            </button>
-          </div>
-          <div className="break-all rounded-md bg-[var(--code-bg)] px-3 py-2 font-mono text-sm text-[var(--text-h)]">
-            {fen}
-          </div>
-        </div>
-      </div>
+      <SettingsPanelBody {...panelProps} />
     </ModalFrame>
   )
 }
@@ -5179,16 +5604,26 @@ function CreateRepertoireModal({
   const { t } = useI18n()
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
-  const [side, setSide] = useState<Side>('white')
+  const [side, setSide] = useState<Side | null>(null)
+  const [sideError, setSideError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!open) return
     setTitle('')
     setDescription('')
-    setSide('white')
+    setSide(null)
+    setSideError(null)
   }, [open])
 
   if (!open) return null
+
+  const colorChoiceButtonClass = (selected: boolean) =>
+    [
+      'counter relative flex min-w-[7.5rem] flex-1 items-center justify-between gap-2 !py-2.5 !pl-3 !pr-2 transition-[box-shadow,background-color,border-color]',
+      selected
+        ? 'border-[var(--accent)] bg-[var(--accent-bg)] text-[var(--accent)] ring-2 ring-[var(--accent-border)] ring-offset-2 ring-offset-[var(--social-bg)]'
+        : 'border-[var(--border)] bg-[var(--bg)] text-[var(--text-h)] hover:bg-[var(--code-bg)]',
+    ].join(' ')
 
   return (
     <ModalFrame
@@ -5206,6 +5641,15 @@ function CreateRepertoireModal({
             className="counter"
             disabled={busy || !title.trim()}
             onClick={() => {
+              if (side == null) {
+                setSideError(
+                  t({
+                    en: 'Choose White or Black for this repertoire.',
+                    fr: 'Choisis les Blancs ou les Noirs pour ce répertoire.',
+                  }),
+                )
+                return
+              }
               void (async () => {
                 const ok = await onSubmit(title.trim(), side, description.trim() || undefined)
                 if (ok) onClose()
@@ -5252,32 +5696,41 @@ function CreateRepertoireModal({
           <div className="mt-2 flex flex-wrap gap-2">
             <button
               type="button"
-              className={[
-                'counter flex items-center gap-2 !py-2',
-                side === 'white' ? 'border-[var(--accent)] bg-[var(--accent-bg)]' : '',
-              ].join(' ')}
+              className={colorChoiceButtonClass(side === 'white')}
               disabled={busy}
-              onClick={() => setSide('white')}
+              aria-pressed={side === 'white'}
+              onClick={() => {
+                setSide('white')
+                setSideError(null)
+              }}
             >
-              <span className="h-2.5 w-2.5 rounded-full border border-neutral-400 bg-white shadow-sm" aria-hidden />
-              {t({ en: 'White', fr: 'Blancs' })}
+              <span className="inline-flex items-center gap-2">
+                <span className="h-2.5 w-2.5 rounded-full border border-neutral-400 bg-white shadow-sm" aria-hidden />
+                {t({ en: 'White', fr: 'Blancs' })}
+              </span>
+              {side === 'white' ? <Check className="h-4 w-4 shrink-0" strokeWidth={2.5} aria-hidden /> : <span className="h-4 w-4 shrink-0" />}
             </button>
             <button
               type="button"
-              className={[
-                'counter flex items-center gap-2 !py-2',
-                side === 'black' ? 'border-[var(--accent)] bg-[var(--accent-bg)]' : '',
-              ].join(' ')}
+              className={colorChoiceButtonClass(side === 'black')}
               disabled={busy}
-              onClick={() => setSide('black')}
+              aria-pressed={side === 'black'}
+              onClick={() => {
+                setSide('black')
+                setSideError(null)
+              }}
             >
-              <span
-                className="h-2.5 w-2.5 rounded-full border border-neutral-800 bg-neutral-900 dark:border-neutral-600 dark:bg-neutral-950"
-                aria-hidden
-              />
-              {t({ en: 'Black', fr: 'Noirs' })}
+              <span className="inline-flex items-center gap-2">
+                <span
+                  className="h-2.5 w-2.5 rounded-full border border-neutral-800 bg-neutral-900 dark:border-neutral-600 dark:bg-neutral-950"
+                  aria-hidden
+                />
+                {t({ en: 'Black', fr: 'Noirs' })}
+              </span>
+              {side === 'black' ? <Check className="h-4 w-4 shrink-0" strokeWidth={2.5} aria-hidden /> : <span className="h-4 w-4 shrink-0" />}
             </button>
           </div>
+          {sideError ? <p className="mt-2 text-xs font-medium text-red-600 dark:text-red-400">{sideError}</p> : null}
         </div>
       </div>
     </ModalFrame>
