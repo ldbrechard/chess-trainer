@@ -3360,110 +3360,163 @@ export function BuildMode() {
               </nav>
             </div>
           ) : mode === 'train' ? (
-          <div className={['mx-auto w-full', device.isMobile ? 'max-w-none px-0' : 'max-w-[420px]'].join(' ')}>
-            <div className="rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-2.5 shadow-[var(--shadow)] sm:p-3">
-              <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
-                <div className="flex min-w-0 items-center gap-1.5">
-                  <span className="truncate text-xs font-medium text-[var(--text-h)]">
-                    {activeRepertoire?.title ?? '—'}
-                  </span>
-                  {activeRepertoire?.side ? (
-                    <span
-                      className={[
-                        'h-2 w-2 shrink-0 rounded-full border',
-                        activeRepertoire.side === 'white'
-                          ? 'border-[var(--border)] bg-white'
-                          : 'border-neutral-700 bg-neutral-900 dark:border-neutral-600 dark:bg-neutral-950',
-                      ].join(' ')}
-                      title={activeRepertoire.side === 'white' ? t({ en: 'White', fr: 'Blancs' }) : t({ en: 'Black', fr: 'Noirs' })}
-                      aria-label={activeRepertoire.side === 'white' ? t({ en: 'White', fr: 'Blancs' }) : t({ en: 'Black', fr: 'Noirs' })}
-                    />
-                  ) : null}
-                </div>
-                <div className="flex shrink-0 items-center gap-0.5">
-                  <button type="button" className="train-accent-btn" onClick={() => setView('home')}>
-                    Home
-                  </button>
-                  <button
-                    type="button"
-                    className="train-accent-btn"
-                    onClick={() => {
-                      if (trainRunActive) suspendTrainRun()
-                      else setMode('build')
-                    }}
-                  >
-                    Build
-                  </button>
-                  <button
-                    type="button"
-                    className="train-accent-btn train-accent-btn--icon inline-flex items-center justify-center"
-                    aria-label={t({ en: 'Board settings', fr: "Paramètres de l'échiquier" })}
-                    title={t({ en: 'Settings', fr: 'Paramètres' })}
-                    onClick={() => setSettingsOpen(true)}
-                  >
-                    <Settings className="h-[12.375px] w-[12.375px]" strokeWidth={2} aria-hidden />
-                  </button>
-                </div>
-              </div>
-              <div className={trainMissPulse ? 'train-miss-shake' : ''}>
-                <Board
-                  fen={currentFen}
-                  dests={!isUsersTurn ? new Map() : dests}
-                  showDests={showDests}
-                  turnColor={turnColor}
-                  orientation={boardOrientation}
-                  onMove={onBoardMoveTrain}
-                  lastMove={undefined}
-                  selectedSquare={hintSelectedSquare}
-                  drawableEnabled={showBoardAnnotations || trainGreyAutoShapes.length > 0}
-                  drawableVisible={showBoardAnnotations || trainGreyAutoShapes.length > 0}
-                  shapes={currentShapes}
-                  annotationAutoShapes={trainGreyAutoShapes}
-                  onShapesChange={(next) => {
-                    setShapesByFen((prev) => ({ ...prev, [currentFen]: next }))
-                  }}
-                  annotationMode={false}
-                  touchMoveMode={device.isMobile}
-                />
-              </div>
-
-                <div className="mt-1.5 text-left">
-                  <div className="flex items-center gap-2">
+            <div className={['mx-auto w-full', device.isMobile ? 'max-w-none px-0' : 'max-w-[980px]'].join(' ')}>
+              <div className="rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-3 shadow-[var(--shadow)] sm:p-4">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold uppercase tracking-wide opacity-70">
+                      {t({ en: 'Train session', fr: "Session d'entraînement" })}
+                    </div>
+                    <div className="mt-0.5 flex min-w-0 items-center gap-2">
+                      <span className="truncate text-sm font-semibold text-[var(--text-h)]">
+                        {activeRepertoire?.title ?? '—'}
+                      </span>
+                      {activeRepertoire?.side ? (
+                        <span
+                          className={[
+                            'h-2.5 w-2.5 shrink-0 rounded-full border',
+                            activeRepertoire.side === 'white'
+                              ? 'border-[var(--border)] bg-white'
+                              : 'border-neutral-700 bg-neutral-900 dark:border-neutral-600 dark:bg-neutral-950',
+                          ].join(' ')}
+                          title={
+                            activeRepertoire.side === 'white'
+                              ? t({ en: 'White', fr: 'Blancs' })
+                              : t({ en: 'Black', fr: 'Noirs' })
+                          }
+                          aria-label={
+                            activeRepertoire.side === 'white'
+                              ? t({ en: 'White', fr: 'Blancs' })
+                              : t({ en: 'Black', fr: 'Noirs' })
+                          }
+                        />
+                      ) : null}
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <button type="button" className="counter mb-0 text-xs" onClick={() => setView('home')}>
+                      {t({ en: 'Home', fr: 'Accueil' })}
+                    </button>
                     <button
                       type="button"
-                      className={[
-                        'toggle-switch toggle-switch--sm',
-                        showBoardAnnotations ? 'is-on' : '',
-                      ].join(' ')}
-                      role="switch"
-                      aria-checked={showBoardAnnotations}
-                      aria-label={t({ en: 'Show board annotations', fr: "Afficher les annotations sur l'échiquier" })}
-                      onClick={() => setShowBoardAnnotations((v) => !v)}
+                      className="counter mb-0 text-xs"
+                      onClick={() => {
+                        if (trainRunActive) suspendTrainRun()
+                        else setMode('build')
+                      }}
                     >
-                      <span className="toggle-thumb" />
+                      Build
                     </button>
-                    <span className="text-[10px] uppercase tracking-wide text-[var(--text-h)] opacity-50">
-                      Annotations
-                    </span>
+                    <button
+                      type="button"
+                      className="counter mb-0 inline-flex h-8 w-8 items-center justify-center !p-0"
+                      aria-label={t({ en: 'Board settings', fr: "Paramètres de l'échiquier" })}
+                      title={t({ en: 'Settings', fr: 'Paramètres' })}
+                      onClick={() => setSettingsOpen(true)}
+                    >
+                      <Settings className="h-4 w-4" strokeWidth={2} aria-hidden />
+                    </button>
                   </div>
-                  {showBoardAnnotations && selectedMove?.comment?.trim() ? (
-                    <div className="mt-1 rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-1 text-[10px] leading-snug text-[var(--text-h)]">
-                      <p className="whitespace-pre-wrap opacity-90">{selectedMove.comment.trim()}</p>
-                    </div>
-                  ) : null}
                 </div>
 
-                <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-left">
-                  <div className="text-xs">
-                    <div className="font-medium text-[var(--text-h)]">Run</div>
+                <div className={['grid gap-3', device.isMobile ? 'grid-cols-1' : 'grid-cols-[minmax(0,1fr)_300px]'].join(' ')}>
+                  <div>
+                    <div className={trainMissPulse ? 'train-miss-shake' : ''}>
+                      <Board
+                        fen={currentFen}
+                        dests={!isUsersTurn ? new Map() : dests}
+                        showDests={showDests}
+                        turnColor={turnColor}
+                        orientation={boardOrientation}
+                        onMove={onBoardMoveTrain}
+                        lastMove={undefined}
+                        selectedSquare={hintSelectedSquare}
+                        drawableEnabled={showBoardAnnotations || trainGreyAutoShapes.length > 0}
+                        drawableVisible={showBoardAnnotations || trainGreyAutoShapes.length > 0}
+                        shapes={currentShapes}
+                        annotationAutoShapes={trainGreyAutoShapes}
+                        onShapesChange={(next) => {
+                          setShapesByFen((prev) => ({ ...prev, [currentFen]: next }))
+                        }}
+                        annotationMode={false}
+                        touchMoveMode={device.isMobile}
+                      />
+                    </div>
+
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        className="counter mb-0 text-xs"
+                        disabled={!isUsersTurn || !hintMoveKeys}
+                        onClick={() => {
+                          if (!isUsersTurn) return
+                          if (!hintMoveKeys) return
+                          setTrainFoundAnswerIds([])
+                          setTrainGreyAutoShapes([])
+                          if (trainRunActive) {
+                            const posKey = currentNodeId ?? null
+                            if (!failedPositionsRef.current.has(posKey)) {
+                              failedPositionsRef.current.add(posKey)
+                              setTrainFailed((n) => n + 1)
+                            }
+                          }
+                          setTrainCombo(0)
+                          setHintStep((prev) => (prev === 0 ? 1 : prev === 1 ? 2 : 0))
+                        }}
+                      >
+                        {t({ en: 'Hint', fr: 'Indice' })}
+                      </button>
+                      <button
+                        type="button"
+                        className="counter mb-0 text-xs"
+                        disabled={busy}
+                        onClick={() => {
+                          void replayToPositionId(currentNodeId)
+                        }}
+                      >
+                        {t({ en: 'Replay moves', fr: 'Rejouer les coups' })}
+                      </button>
+                      <button
+                        type="button"
+                        className="counter mb-0 text-xs"
+                        disabled={busy || replayingSequence}
+                        onClick={() => suspendTrainRun()}
+                      >
+                        {t({ en: 'Suspend', fr: 'Suspendre' })}
+                      </button>
+                      <div className="ml-auto flex items-center gap-2">
+                        <button
+                          type="button"
+                          className={[
+                            'toggle-switch toggle-switch--sm',
+                            showBoardAnnotations ? 'is-on' : '',
+                          ].join(' ')}
+                          role="switch"
+                          aria-checked={showBoardAnnotations}
+                          aria-label={t({ en: 'Show board annotations', fr: "Afficher les annotations sur l'échiquier" })}
+                          onClick={() => setShowBoardAnnotations((v) => !v)}
+                        >
+                          <span className="toggle-thumb" />
+                        </button>
+                        <span className="text-[11px] uppercase tracking-wide opacity-60">
+                          {t({ en: 'Annotations', fr: 'Annotations' })}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <aside className="rounded-lg border border-[var(--border)] bg-[var(--bg)] p-3 text-left">
+                    <div className="text-xs font-semibold uppercase tracking-wide opacity-70">
+                      {t({ en: 'Run status', fr: 'Statut du run' })}
+                    </div>
                     {!replayingSequence ? (
-                      <div className="font-mono text-[11px]">
+                      <div className="mt-1 text-sm font-medium text-[var(--text-h)]">
                         {children.length === 0
                           ? t({ en: 'End of line', fr: 'Fin de ligne' })
                           : isUsersTurn
                             ? expectedTrainRepliesList.length > 1
                               ? t(
-                                  { en: 'Your turn · {count} answer(s) to find', fr: 'À toi · {count} réponse(s) à trouver' },
+                                  { en: 'Your turn · {count} answer(s)', fr: 'À toi · {count} réponse(s)' },
                                   { count: trainRepliesRemaining },
                                 )
                               : t({ en: 'Your turn', fr: 'À toi' })
@@ -3472,95 +3525,79 @@ export function BuildMode() {
                     ) : null}
                     {trainRunActive ? (
                       <>
-                        <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-[var(--code-bg)]">
+                        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--code-bg)]">
                           <div
                             className="h-full rounded-full bg-[var(--accent)] transition-all duration-300"
                             style={{ width: `${trainTotal === 0 ? 0 : (trainPassed / trainTotal) * 100}%` }}
                           />
                         </div>
-                        <div className="mt-1 flex items-center justify-between gap-2 text-[10px] opacity-80">
-                          <div>
-                            {t(
-                              { en: 'Remaining: {remaining} · Passed: {passed} · Failed: {failed}', fr: 'Restantes: {remaining} · Passées: {passed} · Failed: {failed}' },
-                              { remaining: trainRemaining, passed: trainPassed, failed: trainFailed },
-                            )}
-                          </div>
-                          <div className="font-mono">{t({ en: 'Depth = {depth}', fr: 'Profondeur = {depth}' }, { depth: path.length })}</div>
+                        <div className="mt-2 text-xs opacity-85">
+                          {t(
+                            { en: 'Remaining: {remaining} · Passed: {passed} · Failed: {failed}', fr: 'Restantes: {remaining} · Réussies: {passed} · Échecs: {failed}' },
+                            { remaining: trainRemaining, passed: trainPassed, failed: trainFailed },
+                          )}
                         </div>
                       </>
                     ) : null}
-                  </div>
-
-                  {trainCombo >= 3 ? (
-                    <div
-                      className="flex items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--bg)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--text-h)]"
-                      title="Combo"
-                    >
-                      <span className="select-none">🔥</span>
-                      <span className="font-mono">{trainCombo}</span>
+                    <div className="mt-2 text-xs font-mono opacity-80">
+                      {t({ en: 'Depth {depth}', fr: 'Profondeur {depth}' }, { depth: path.length })}
                     </div>
-                  ) : null}
-
-                  <button
-                    type="button"
-                    className="train-accent-btn"
-                    disabled={!isUsersTurn || !hintMoveKeys}
-                    onClick={() => {
-                      if (!isUsersTurn) return
-                      if (!hintMoveKeys) return
-                      setTrainFoundAnswerIds([])
-                      setTrainGreyAutoShapes([])
-                      if (trainRunActive) {
-                        const posKey = currentNodeId ?? null
-                        if (!failedPositionsRef.current.has(posKey)) {
-                          failedPositionsRef.current.add(posKey)
-                          setTrainFailed((n) => n + 1)
-                        }
-                      }
-                      setTrainCombo(0)
-                      setHintStep((prev) => (prev === 0 ? 1 : prev === 1 ? 2 : 0))
-                    }}
-                  >
-                    Hint
-                  </button>
-                  <button
-                    type="button"
-                    className="train-accent-btn"
-                    disabled={busy}
-                    onClick={() => {
-                      void replayToPositionId(currentNodeId)
-                    }}
-                  >
-                    Replay moves
-                  </button>
-                  <button
-                    type="button"
-                    className="train-accent-btn"
-                    disabled={busy || replayingSequence}
-                    onClick={() => suspendTrainRun()}
-                  >
-                    {t({ en: 'Suspend', fr: 'Suspendre' })}
-                  </button>
+                    {trainCombo >= 3 ? (
+                      <div
+                        className="mt-2 inline-flex items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--social-bg)] px-2 py-1 text-xs font-medium text-[var(--text-h)]"
+                        title="Combo"
+                      >
+                        <span className="select-none">🔥</span>
+                        <span className="font-mono">{trainCombo}</span>
+                      </div>
+                    ) : null}
+                    {trainMissPulse ? (
+                      <div className="mt-2 rounded border border-red-400/40 bg-red-500/10 px-2 py-1 text-xs font-medium text-red-600 dark:text-red-300">
+                        {t({ en: 'Incorrect move.', fr: 'Coup incorrect.' })}
+                      </div>
+                    ) : null}
+                    {hintStep > 0 ? (
+                      <div className="mt-2 text-xs opacity-80">
+                        {hintStep === 1
+                          ? t({ en: 'Hint: piece to move', fr: 'Indice : pièce à jouer' })
+                          : t({ en: 'Hint: destination square', fr: 'Indice : case de destination' })}
+                      </div>
+                    ) : null}
+                  </aside>
                 </div>
 
-                {trainMissPulse ? (
-                  <div className="mt-1.5 rounded border border-red-400/40 bg-red-500/10 px-2 py-1 text-left text-[10px] font-medium text-red-600 dark:text-red-300">
-                    {t({ en: 'Incorrect move.', fr: 'Coup incorrect.' })}
+                {trainRunSuspended ? (
+                  <div className="mt-3 rounded-md border border-[var(--border)] bg-[var(--accent-bg)] px-3 py-3 text-left text-sm text-[var(--text-h)]">
+                    <div className="text-xs font-medium opacity-80">{t({ en: 'Training paused', fr: 'Entraînement en pause' })}</div>
+                    <div className="mt-2 text-xs opacity-75">
+                      {t(
+                        { en: 'Passed: {passed}/{total} · Remaining: {remaining} · Fails: {failed}', fr: 'Réussies: {passed}/{total} · Restantes: {remaining} · Échecs: {failed}' },
+                        { passed: trainPassed, total: trainTotal, remaining: trainRemaining, failed: trainFailed },
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      className="counter mt-3"
+                      disabled={busy || replayingSequence}
+                      onClick={() => void resumeTrainRun()}
+                    >
+                      {t({ en: 'Resume training', fr: "Reprendre l'entraînement" })}
+                    </button>
                   </div>
                 ) : null}
 
-                <div className="mt-1.5 text-left">
-                  <div className="text-[11px] font-medium text-[var(--text-h)]">{t({ en: 'Path', fr: 'Chemin' })}</div>
-                  <div className="mt-1 flex flex-wrap gap-1">
+                <div className="mt-3 text-left">
+                  <div className="text-xs font-semibold uppercase tracking-wide opacity-70">{t({ en: 'Path', fr: 'Chemin' })}</div>
+                  <div className="mt-1.5 flex flex-wrap gap-1.5">
                     {path.length === 0 ? (
-                      <span className="rounded bg-[var(--code-bg)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--text-h)]">
+                      <span className="rounded bg-[var(--code-bg)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--text-h)]">
                         (root)
                       </span>
                     ) : (
                       path.map((move, depth) => (
                         <span
                           key={move.id}
-                          className="rounded bg-[var(--code-bg)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--text-h)]"
+                          className="rounded bg-[var(--code-bg)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--text-h)]"
                         >
                           {moveNumberPrefix(depth, depth === 0)}
                           {formatMoveWithNag(move)}
@@ -3570,14 +3607,14 @@ export function BuildMode() {
                   </div>
                 </div>
 
-                {hintStep > 0 ? (
-                  <div className="mt-1.5 text-left text-[10px] opacity-80">
-                    {hintStep === 1 ? t({ en: 'Hint: piece to move', fr: 'Hint: pièce à jouer' }) : t({ en: 'Hint: destination square', fr: 'Hint: case de destination' })}
+                {showBoardAnnotations && selectedMove?.comment?.trim() ? (
+                  <div className="mt-3 rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm leading-snug text-[var(--text-h)]">
+                    <p className="whitespace-pre-wrap opacity-90">{selectedMove.comment.trim()}</p>
                   </div>
                 ) : null}
+              </div>
             </div>
-          </div>
-        ) : mode === 'puzzle' ? (
+          ) : mode === 'puzzle' ? (
           <div className={['mx-auto w-full', device.isMobile ? 'max-w-none px-0' : 'max-w-[420px]'].join(' ')}>
             <div className="rounded-xl border border-[var(--border)] bg-[var(--social-bg)] p-2.5 shadow-[var(--shadow)] sm:p-3">
               <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
