@@ -10,6 +10,7 @@ import {
   expectedTrainReplies,
   formatDurationMs,
   lineToPgnMoves,
+  pvUciToSanLine,
 } from './buildHelpers'
 
 function move(partial: Partial<Move> & Pick<Move, 'id' | 'notation' | 'fen'>): Move {
@@ -103,5 +104,12 @@ describe('formatting helpers', () => {
       { lastTrainDayKey: '2024-02-01' },
     ].sort(compareRepertoiresByLastTrainDesc)
     expect(sorted.map((r) => r.lastTrainDayKey)).toEqual(['2024-02-01', '2024-01-01', undefined])
+  })
+
+  it('does not throw when replaying a stale PV on a new FEN (chess.js throws on illegal moves)', () => {
+    const afterE4 = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1'
+    // PV from the starting position, applied after 1.e4 → first ply already played / illegal.
+    expect(() => pvUciToSanLine(afterE4, ['e2e4', 'e7e5', 'g1f3'])).not.toThrow()
+    expect(pvUciToSanLine(afterE4, ['e2e4', 'e7e5', 'g1f3'])).toBe('e2e4 e7e5 g1f3')
   })
 })

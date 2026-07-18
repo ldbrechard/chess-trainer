@@ -135,16 +135,23 @@ export function pvUciToSanLine(fen: string, pvUci: string[] | undefined): string
   }
   const out: string[] = []
   for (let i = 0; i < pvUci.length; i += 1) {
-    const uci = pvUci[i]!
+    const uci = pvUci[i]
+    if (typeof uci !== 'string' || uci.length < 4) break
     const from = uci.slice(0, 2)
     const to = uci.slice(2, 4)
     const promotion = uci.length > 4 ? uci[4] : undefined
-    const m = c.move({ from, to, promotion: promotion as 'q' | 'r' | 'b' | 'n' | undefined })
+    // chess.js v1 throws on illegal moves (does not return null).
+    let m: ReturnType<Chess['move']> | null = null
+    try {
+      m = c.move({ from, to, promotion: promotion as 'q' | 'r' | 'b' | 'n' | undefined })
+    } catch {
+      break
+    }
     if (!m) break
     if (m.color === 'w') out.push(`${Math.max(1, c.moveNumber() - 1)}. ${m.san}`)
     else out.push(m.san)
   }
-  return out.length > 0 ? out.join(' ') : pvUci.join(' ')
+  return out.length > 0 ? out.join(' ') : pvUci.filter((x) => typeof x === 'string').join(' ')
 }
 
 export function lineToPgnMoves(moves: Move[]): string {

@@ -88,8 +88,12 @@ function fenAfterUci(baseFen: string, uci: string): string | null {
   const from = t.slice(0, 2)
   const to = t.slice(2, 4)
   const promotion = t.length >= 5 ? (t[4] as 'q' | 'r' | 'b' | 'n') : undefined
-  const m = c.move({ from, to, promotion })
-  return m ? c.fen() : null
+  try {
+    const m = c.move({ from, to, promotion })
+    return m ? c.fen() : null
+  } catch {
+    return null
+  }
 }
 
 function isLikely429(err: unknown) {

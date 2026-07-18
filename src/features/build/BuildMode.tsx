@@ -234,7 +234,12 @@ export function BuildMode() {
 
   const chess = useMemo(() => {
     const c = new Chess()
-    c.load(currentFen)
+    try {
+      c.load(currentFen)
+    } catch {
+      // Keep a legal board if stored FEN is corrupt — avoids blanking the whole UI.
+      return new Chess()
+    }
     return c
   }, [currentFen])
 
@@ -670,9 +675,12 @@ export function BuildMode() {
     const eng = stockfishRef.current
     if (!eng) return
     let cancelled = false
+    const fenAtStart = currentFen
+    // Drop stale PV immediately so render never replays an old line on a new FEN.
+    setPositionEval(null)
     setPositionEvalBusy(true)
     void eng
-      .analyzeFen(currentFen, { depth: 12, movetimeMs: 450 })
+      .analyzeFen(fenAtStart, { depth: 12, movetimeMs: 450 })
       .then((e) => {
         if (!cancelled) setPositionEval(e)
       })
