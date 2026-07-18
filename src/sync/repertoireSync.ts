@@ -1,29 +1,14 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { db, type Side, type StoredMove, type StoredRepertoire } from '../db/schema'
+import { db } from '../db/schema'
 import { getSupabaseClient, isSupabaseConfigured } from '../lib/supabaseClient'
-
-type RepRow = {
-  id: string
-  user_id: string
-  title: string
-  side: string
-  created_at: string
-  updated_at?: string
-}
-
-type MoveRow = {
-  id: string
-  repertoire_id: string
-  parent_id: string | null
-  fen: string
-  notation: string
-  nag: string | null
-  comment: string | null
-  eval: number | null
-  is_main_line?: boolean | null
-  created_at: string
-  updated_at?: string
-}
+import {
+  remoteToStoredMove,
+  remoteToStoredRep,
+  sortMovesForUpsert,
+  ts,
+  type MoveRow,
+  type RepRow,
+} from './syncMappers'
 
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -34,47 +19,6 @@ export function scheduleRepertoireSync(): void {
     debounceTimer = null
     void runRepertoireSync()
   }, 900)
-}
-
-function ts(row: { updated_at?: string; created_at?: string }): number {
-  const u = row.updated_at ?? row.created_at
-  return u ? new Date(u).getTime() : 0
-}
-
-function remoteToStoredRep(r: RepRow, local?: StoredRepertoire): StoredRepertoire {
-  return {
-    id: r.id,
-    title: r.title,
-    description: local?.description,
-    side: r.side as Side,
-    createdAt: new Date(r.created_at).getTime(),
-    updatedAt: ts(r),
-    dirty: false,
-    // Preserve local-only training metadata (not stored remotely).
-    trainStreak: local?.trainStreak,
-    lastTrainDayKey: local?.lastTrainDayKey,
-    fsrsFirstDayKey: local?.fsrsFirstDayKey,
-    notificationsEnabled: local?.notificationsEnabled ?? false,
-    lastDailyReminderDayKey: local?.lastDailyReminderDayKey,
-    lastInactivityReminderDayKey: local?.lastInactivityReminderDayKey,
-  }
-}
-
-function remoteToStoredMove(r: MoveRow): StoredMove {
-  return {
-    id: r.id,
-    repertoireId: r.repertoire_id,
-    parentId: r.parent_id,
-    fen: r.fen,
-    notation: r.notation,
-    nag: r.nag ?? undefined,
-    comment: r.comment ?? '',
-    eval: r.eval ?? undefined,
-    isMainLine: r.is_main_line ? true : undefined,
-    createdAt: r.created_at,
-    updatedAt: ts(r),
-    dirty: false,
-  }
 }
 
 async function pullRemoteIntoDexie(supabase: SupabaseClient): Promise<void> {
@@ -109,30 +53,6 @@ async function replaceMovesFromRemote(supabase: SupabaseClient, repertoireId: st
   const moves = (rows ?? []) as MoveRow[]
   await db.moves.where('repertoireId').equals(repertoireId).delete()
   if (moves.length) await db.moves.bulkAdd(moves.map(remoteToStoredMove))
-}
-
-function sortMovesForUpsert(moves: StoredMove[]): StoredMove[] {
-  const dirtyIds = new Set(moves.map((m) => m.id))
-  const out: StoredMove[] = []
-  const placed = new Set<string>()
-  let safety = 0
-  while (out.length < moves.length && safety < moves.length * 4) {
-    safety += 1
-    let progressed = false
-    for (const m of moves) {
-      if (placed.has(m.id)) continue
-      const pid = m.parentId
-      const parentReady = pid == null || !dirtyIds.has(pid) || placed.has(pid)
-      if (parentReady) {
-        out.push(m)
-        placed.add(m.id)
-        progressed = true
-      }
-    }
-    if (!progressed) break
-  }
-  for (const m of moves) if (!placed.has(m.id)) out.push(m)
-  return out
 }
 
 async function pushDirtyToRemote(supabase: SupabaseClient, userId: string): Promise<void> {

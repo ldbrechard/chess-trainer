@@ -4,8 +4,9 @@
 - Framework: React (Vite) + TypeScript
 - Logic: Chess.js
 - UI Board: Chessground
-- State Management: Zustand
+- State Management: Zustand (`src/stores/appShellStore.ts` pour la navigation shell ; le reste est encore majoritairement local à `BuildMode`)
 - Storage: Dexie.js (Local) + Supabase (Remote)
+- Tests: Vitest (`npm test`)
 
 ## Structure des données
 - Repertoire: Ensemble de nodes (mouvements)
